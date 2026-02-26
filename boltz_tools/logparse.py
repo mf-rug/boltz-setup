@@ -74,7 +74,7 @@ def _parse_scontrol_block(lines: List[str]) -> dict:
 
 
 def _parse_epilog_block(lines: List[str]) -> dict:
-    """Extract key:value pairs from the Hábrók epilog section."""
+    """Extract key:value pairs from the cluster epilog section."""
     result = {}
     for line in lines:
         m = re.match(r'^(.+?)\s{2,}:\s+(.+)$', line)
