@@ -1,5 +1,4 @@
 #!/bin/bash
 # Resolve the directory this script lives in (works even via symlink in PATH)
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
-module load Python/3.11.5-GCCcore-13.2.0 2>/dev/null
 PYTHONPATH="$SCRIPT_DIR" exec python3 -m boltz_tools "$@"

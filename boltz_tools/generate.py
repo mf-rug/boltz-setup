@@ -371,59 +371,36 @@ def estimate_tokens(entities: list) -> int:
     return total
 
 
-# GPU availability per partition (from `sinfo -p ... -o "%P %G"`)
-_GPU_PARTITIONS = {
-    "v100":          ["gpushort", "gpumedium", "gpulong"],
-    "a100":          ["gpushort", "gpumedium", "gpulong"],
-    "rtx_pro_6000":  ["gpushort", "gpumedium", "gpulong"],
-    "l40s":          ["gpushort"],
-}
-
-# Upgrade path: if a GPU isn't available on the needed partition, try these
-_GPU_UPGRADE = {
-    "v100": "a100",
-    "l40s": "a100",
-}
-
-
 def recommend_gpu(total_tokens: int) -> Dict:
     """Recommend GPU type, memory, and extra boltz flags based on token count.
 
+    Tiers are read from ~/.config/boltz-setup/config.yaml (gpu_tiers).
+
     Returns a dict with keys:
-        gpu_type: str   — e.g. "v100", "l40s", "a100"
-        gpu_sbatch: str — e.g. "v100:1"
-        mem: str        — system memory, e.g. "16GB"
+        gpu_sbatch: str          — e.g. "v100:1" (passed to --gpus-per-node)
+        mem: str                 — system memory, e.g. "16GB"
         boltz_extra_flags: list[str] — e.g. ["--no_kernels"]
-        warnings: list[str] — user-facing messages
+        warnings: list[str]     — user-facing messages
     """
+    from .cluster import GPU_TIERS
     warnings: List[str] = []
 
-    if total_tokens < 700:
-        gpu_type = "v100"
-        mem = "16GB"
-        boltz_extra_flags = ["--no_kernels"]
-    elif total_tokens <= 1500:
-        gpu_type = "l40s"
-        mem = "32GB"
-        boltz_extra_flags = []
-    elif total_tokens <= 2500:
-        gpu_type = "a100"
-        mem = "32GB"
-        boltz_extra_flags = []
-    else:
-        gpu_type = "a100"
-        mem = "64GB"
-        boltz_extra_flags = []
+    tier = GPU_TIERS[-1]  # fallback: largest tier
+    for t in GPU_TIERS:
+        if total_tokens <= t["max_tokens"]:
+            tier = t
+            break
+
+    if tier.get("warn"):
         warnings.append(
             f"Very large job ({total_tokens} tokens). "
             "Consider splitting into smaller complexes if it OOMs."
         )
 
     return {
-        "gpu_type": gpu_type,
-        "gpu_sbatch": f"{gpu_type}:1",
-        "mem": mem,
-        "boltz_extra_flags": boltz_extra_flags,
+        "gpu_sbatch": tier["gpu_sbatch"],
+        "mem": tier["mem"],
+        "boltz_extra_flags": tier.get("extra_flags", []),
         "warnings": warnings,
     }
 
@@ -484,39 +461,46 @@ def recommend_time(total_tokens: int, boltz_params: BoltzParams, n_variants: int
         # Round up to nearest hour
         safe_minutes = ((safe_minutes + 59) // 60) * 60
 
-    # Select partition
+    # Select partition — pick the shortest one whose max_hours covers safe_minutes
+    from .cluster import GPU_TIERS as _GPU_TIERS, PARTITIONS as _PARTITIONS
     warnings: List[str] = []
-    if safe_minutes <= 240:
-        partition = "gpushort"
-    elif safe_minutes <= 1440:
-        partition = "gpumedium"
-    elif safe_minutes <= 4320:
-        partition = "gpulong"
-    else:
-        partition = "gpulong"
-        safe_minutes = 4320
-        warnings.append(
-            f"Estimated time (~{int(raw_minutes)} min) exceeds gpulong limit (72h). "
-            "Setting 3-00:00:00 — job may not complete. Consider reducing "
-            "diffusion_samples or splitting the job."
-        )
+    partition = None
+    for p in _PARTITIONS:
+        if safe_minutes <= p["max_hours"] * 60:
+            partition = p["name"]
+            break
+    if partition is None:
+        last_p = _PARTITIONS[-1]
+        partition = last_p["name"]
+        max_minutes = last_p["max_hours"] * 60
+        if safe_minutes > max_minutes:
+            safe_minutes = max_minutes
+            warnings.append(
+                f"Estimated time (~{int(raw_minutes)} min) exceeds "
+                f"{partition} limit ({last_p['max_hours']}h). "
+                f"Setting {last_p['max_hours']}h — job may not complete. "
+                "Consider reducing diffusion_samples or splitting the job."
+            )
 
-    # Check GPU-partition compatibility and upgrade GPU if needed
+    # Check GPU-partition compatibility; upgrade GPU if needed
     if gpu_rec is not None:
-        gpu_type = gpu_rec["gpu_type"]
-        available = _GPU_PARTITIONS.get(gpu_type, [])
-        if partition not in available:
-            upgraded = _GPU_UPGRADE.get(gpu_type)
-            if upgraded and partition in _GPU_PARTITIONS.get(upgraded, []):
+        gpu_sbatch = gpu_rec["gpu_sbatch"]
+        selected_p = next((p for p in _PARTITIONS if p["name"] == partition), None)
+        if selected_p and gpu_sbatch not in selected_p.get("gpus", []):
+            # Find the cheapest GPU tier available on this partition that fits the job
+            fallback_tier = None
+            for t in _GPU_TIERS:
+                if t["gpu_sbatch"] in selected_p.get("gpus", []) and total_tokens <= t["max_tokens"]:
+                    fallback_tier = t
+                    break
+            if fallback_tier and fallback_tier["gpu_sbatch"] != gpu_sbatch:
                 warnings.append(
-                    f"{gpu_type} not available on {partition} — "
-                    f"upgrading to {upgraded}."
+                    f"{gpu_sbatch} not available on {partition} — "
+                    f"upgrading to {fallback_tier['gpu_sbatch']}."
                 )
-                gpu_rec["gpu_type"] = upgraded
-                gpu_rec["gpu_sbatch"] = f"{upgraded}:1"
-                # Drop --no_kernels if upgrading from v100
-                if gpu_type == "v100" and "--no_kernels" in gpu_rec.get("boltz_extra_flags", []):
-                    gpu_rec["boltz_extra_flags"].remove("--no_kernels")
+                gpu_rec["gpu_sbatch"] = fallback_tier["gpu_sbatch"]
+                gpu_rec["mem"] = fallback_tier["mem"]
+                gpu_rec["boltz_extra_flags"] = fallback_tier.get("extra_flags", [])
 
     hours = safe_minutes // 60
     mins = safe_minutes % 60
@@ -767,11 +751,13 @@ def build_job_script(
     cache_dir: str,
     boltz_params: BoltzParams,
     slurm_params: SlurmParams,
-    python_module: str = "Python/3.11.5-GCCcore-13.2.0",
+    python_module: Optional[str] = None,
 ) -> str:
     """Build a Slurm job script for boltz predict."""
+    if python_module is None:
+        from .cluster import PYTHON_MODULE
+        python_module = PYTHON_MODULE
     flag_list = _boltz_flags(boltz_params)
-    tools_root = _boltz_tools_root()
 
     # Build multi-line boltz command for readability
     boltz_parts = [
@@ -791,7 +777,11 @@ def build_job_script(
 #SBATCH --nodes={slurm_params.nodes}
 #SBATCH --cpus-per-task={slurm_params.cpus_per_task}
 #SBATCH --mem={slurm_params.mem}
-#SBATCH --output={job_dir}/slurm-%j.out
+#SBATCH --output=slurm-%j.out
+
+# Resolve job directory: use Slurm's submit dir (most reliable),
+# falling back to script location for non-Slurm execution.
+_job_dir="${{SLURM_SUBMIT_DIR:-$(cd "$(dirname "$(readlink -f "$0")")" && pwd)}}"
 
 scontrol show job $SLURM_JOB_ID
 
@@ -816,7 +806,8 @@ cleanup() {{
     fi
     echo "========================================="
     # Generate clean log (best-effort, never fail the job)
-    PYTHONPATH={tools_root} python -m boltz_tools log {job_dir} || true
+    # boltz_tools/ is shipped alongside job.sh by boltz-setup-yaml
+    PYTHONPATH="$_job_dir" python -m boltz_tools log "$_job_dir" || true
 }}
 trap cleanup EXIT
 
@@ -831,7 +822,7 @@ nvidia-smi
 # Memory optimization
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-cd {job_dir}
+cd "$_job_dir"
 
 {boltz_cmd}
 

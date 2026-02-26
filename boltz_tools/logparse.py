@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from .cluster import BOLTZ_JOBS_DIR
+from .cluster import BOLTZ_JOBS_DIR, EPILOG_MARKER
 from .tui import (
     USE_COLOR,
     bold,
@@ -105,10 +105,10 @@ def parse_slurm_log(text: str) -> ParsedLog:
                 scontrol_lines.append(line)
 
         # Epilog block between ###... markers
-        if line.startswith("###") and "Hábrók" not in line and in_epilog:
+        if line.startswith("###") and (not EPILOG_MARKER or EPILOG_MARKER not in line) and in_epilog:
             in_epilog = False
             continue
-        if "Hábrók Cluster" in line:
+        if EPILOG_MARKER and EPILOG_MARKER in line:
             in_epilog = True
             continue
         if in_epilog:

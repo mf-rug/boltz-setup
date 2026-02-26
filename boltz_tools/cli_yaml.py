@@ -7,6 +7,7 @@ scripting and batch pipelines.
 
 import argparse
 import re
+import shutil
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -550,7 +551,17 @@ examples:
     job_sh.chmod(0o755)
 
     # -----------------------------------------------------------------------
-    # 11. Summary
+    # 11. Copy boltz_tools package into out-dir so the cluster can import it
+    # for log parsing (PYTHONPATH="$_job_dir" in job.sh cleanup trap).
+    # -----------------------------------------------------------------------
+    _tools_src = Path(__file__).resolve().parent
+    _tools_dst = out_dir / "boltz_tools"
+    if _tools_dst.exists():
+        shutil.rmtree(_tools_dst)
+    shutil.copytree(_tools_src, _tools_dst)
+
+    # -----------------------------------------------------------------------
+    # 12. Summary
     # -----------------------------------------------------------------------
     all_warnings = gpu_rec.get("warnings", []) + time_rec.get("warnings", [])
     for w in all_warnings:
@@ -558,9 +569,10 @@ examples:
 
     print(f"Wrote {n_yamls} YAML(s) to {input_dir}/")
     print(f"Wrote job.sh to {out_dir}/")
+    print(f"Copied boltz_tools/ to {out_dir}/")
     print(
         f"  Slurm: partition={partition}  time={time_str}  "
         f"gpu={gpu_sbatch}  mem={mem}"
     )
     print(f"\nTo submit:")
-    print(f"  cd {out_dir} && sbatch job.sh")
+    print(f"  hpc-submit {out_dir}/job.sh")

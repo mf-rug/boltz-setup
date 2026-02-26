@@ -23,15 +23,40 @@ echo 'alias boltz-setup-yaml="/path/to/boltz-setup-yaml"' >> ~/.bashrc
 source ~/.bashrc
 ```
 
-Requires `boltz` to be installed:
+Requires Python 3.10+ and PyYAML:
 ```bash
-pip install --user boltz
+pip install pyyaml
 ```
 
-Python module must be available:
-```bash
-module load Python/3.11.5-GCCcore-13.2.0
+## Cluster configuration
+
+On first run, `boltz-setup-yaml` writes `~/.config/boltz-setup/config.yaml`
+with annotated defaults. Edit it to match your HPC environment:
+
+```yaml
+# Python module loaded in every job script
+python_module: Python/3.11.5-GCCcore-13.2.0
+
+# Scratch paths ({user} is replaced with your cluster username)
+scratch_dir: /scratch/{user}
+cache_dir: /scratch/{user}/boltz
+jobs_dir: /scratch/{user}/boltz_jobs
+
+# GPU recommendation tiers (first entry where tokens <= max_tokens wins)
+gpu_tiers:
+  - {max_tokens: 700,  gpu_sbatch: "v100:1", mem: 16GB, extra_flags: [--no_kernels]}
+  - {max_tokens: 1500, gpu_sbatch: "l40s:1", mem: 32GB, extra_flags: []}
+  ...
+
+# Slurm partitions (shortest first)
+partitions:
+  - {name: gpushort,  max_hours: 4,  gpus: [v100:1, a100:1, l40s:1]}
+  - {name: gpumedium, max_hours: 24, gpus: [v100:1, a100:1]}
+  ...
 ```
+
+The cluster username is auto-detected from the `$hpc`/`$HPC` environment variable
+(`user@host` format), from `~/.config/rsyncer/config.json`, or from `$LOGNAME`.
 
 ---
 
@@ -271,19 +296,27 @@ Partition is chosen to fit the estimated wall time (`gpushort` ≤4h, `gpumedium
 ## Typical workflow
 
 ```bash
-# 1. Set up interactively
-boltz-setup myjob
-
-# 2. Or non-interactively (e.g. from a script)
+# 1. Generate job directory (locally)
 boltz-setup-yaml --protein @targets.fasta --smiles "$(cat ligand.smi)" \
   --affinity B --use-msa-server --name screen --out-dir ./screen/
 
-# 3. Submit
-cd /scratch/$LOGNAME/boltz_jobs/myjob && sbatch job.sh
+# 2. Submit to cluster (uploads files + runs sbatch via SSH)
+hpc-submit screen/job.sh
+# → prints: Job ID: 12345678
 
-# 4. Check status
-squeue -u $LOGNAME
+# 3. Check status
+hpc-submit --status 12345678
+# → RUNNING  or  COMPLETED 00:04:32 node01
 
-# 5. Results are in output/; clean log is auto-generated
-cat myjob_COMPLETED_*.log
+# 4. Download results
+rsyncer screen --yes
+# → syncs ./screen/ from cluster, including the clean summary log
+
+# 5. View results
+cat screen/screen_COMPLETED_*.log
+```
+
+Or use the interactive wizard for one-off jobs:
+```bash
+boltz-setup myjob
 ```
