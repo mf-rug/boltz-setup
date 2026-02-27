@@ -8,6 +8,7 @@ is written so the user can customise it.
 Run `boltz-setup-yaml --init` to (re)write the config interactively.
 """
 
+import base64
 import json
 import os
 import subprocess
@@ -287,11 +288,16 @@ def remote_detect(ssh_target: str) -> Dict[str, Any]:
             done
         fi
     """)
+    # Encode the script as base64 and pass it in the command, not via stdin.
+    # Passing via stdin interferes with SSH auth: if the ControlMaster socket
+    # isn't found, SSH reads the script as the keyboard-interactive response.
+    encoded = base64.b64encode(script.encode()).decode()
+    remote_cmd = f"echo {encoded} | base64 -d | bash -l"
     try:
         result = subprocess.run(
             ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-             ssh_target, "bash", "-l"],
-            input=script, capture_output=True, text=True, timeout=30,
+             ssh_target, remote_cmd],
+            capture_output=True, text=True, timeout=30,
         )
     except Exception as e:
         return {"boltz_bin": None, "cache_dir": None, "storage": {}, "error": str(e)}
