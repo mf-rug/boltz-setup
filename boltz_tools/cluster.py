@@ -262,8 +262,8 @@ def remote_detect(ssh_target: str) -> Dict[str, Any]:
 
     Runs a login shell (bash -l) so that module-system env vars and
     sysadmin-set storage vars ($SCRATCH, $WORK, …) are visible.
-    Uses BatchMode=yes so it never hangs waiting for a password —
-    it relies on an active SSH ControlMaster or key-based auth.
+    Relies on an active SSH ControlMaster or key-based auth to avoid
+    interactive prompts.
 
     Returns a dict with:
         boltz_bin:  str | None  — absolute path to the boltz binary
@@ -295,7 +295,7 @@ def remote_detect(ssh_target: str) -> Dict[str, Any]:
     remote_cmd = f"echo {encoded} | base64 -d | bash -l"
     try:
         result = subprocess.run(
-            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+            ["ssh", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=accept-new",
              ssh_target, remote_cmd],
             capture_output=True, text=True, timeout=30,
         )
