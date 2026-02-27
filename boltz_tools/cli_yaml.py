@@ -219,7 +219,7 @@ examples:
   # Protein from FASTA + ligand + affinity + pocket constraint
   boltz-setup-yaml --protein @seqs.fasta --smiles "c1ccccc1" \\
     --affinity B --pocket-binder B --pocket-contacts A:96,A:100 \\
-    --use-msa-server --name screen --out-dir ./screen/
+    --name screen --out-dir ./screen/
 
   # Protein from FASTA with 2 copies each
   boltz-setup-yaml --protein "@seqs.fasta[2]" --smiles "c1ccccc1" --out-dir ./s2/
@@ -303,8 +303,9 @@ examples:
                         help="Number of diffusion samples (default: 10).")
     bp_grp.add_argument("--sampling-steps", type=int, default=200, metavar="N",
                         help="Diffusion sampling steps (default: 200).")
-    bp_grp.add_argument("--use-msa-server", action="store_true", default=False,
-                        help="Generate MSAs via MMseqs2 server.")
+    bp_grp.add_argument("--no-msa-server", action="store_false", dest="use_msa_server",
+                        default=True,
+                        help="Disable MSA generation via MMseqs2 server (on by default).")
     bp_grp.add_argument("--model", default="boltz2", choices=["boltz1", "boltz2"],
                         help="Model version (default: boltz2).")
     bp_grp.add_argument("--output-format", default="mmcif", choices=["mmcif", "pdb"],
@@ -339,8 +340,8 @@ examples:
         help="Directory for YAML(s) and job.sh. Required unless --stdout.",
     )
     out_grp.add_argument(
-        "--name", default="job", metavar="NAME",
-        help="Job name prefix for YAML filenames and Slurm --job-name (default: job).",
+        "--name", default=None, metavar="NAME",
+        help="Job name prefix for YAML filenames and Slurm --job-name (default: out-dir basename).",
     )
     out_grp.add_argument(
         "--stdout", action="store_true",
@@ -352,6 +353,10 @@ examples:
     # Validate output mode
     if not args.stdout and not args.out_dir:
         parser.error("Either --out-dir or --stdout is required.")
+
+    # Default name: out-dir basename (or "job" for --stdout)
+    if args.name is None:
+        args.name = Path(args.out_dir).name if args.out_dir else "job"
 
     # -----------------------------------------------------------------------
     # 1. Parse entities

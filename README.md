@@ -173,7 +173,7 @@ Written into `job.sh`, not the YAML.
 | `--recycling-steps N` | `10` | Structure recycling iterations |
 | `--diffusion-samples N` | `10` | Number of structure samples |
 | `--sampling-steps N` | `200` | Diffusion sampling steps |
-| `--use-msa-server` | off | Generate MSAs via MMseqs2 server |
+| `--no-msa-server` | — | Disable MSA generation via MMseqs2 server (on by default) |
 | `--model boltz1\|boltz2` | `boltz2` | Model version |
 | `--output-format mmcif\|pdb` | `mmcif` | Structure output format |
 | `--use-potentials` | off | Apply physics-based steering potentials |
@@ -212,7 +212,7 @@ boltz-setup-yaml --protein "MVHLTPEEK[2]" --smiles "c1ccccc1" --stdout
 # Protein + ligand with affinity + pocket constraint
 boltz-setup-yaml --protein MVHLTPEEK --smiles "c1ccccc1" \
   --affinity B --pocket-binder B --pocket-contacts A:96,A:100 \
-  --use-msa-server --name myjob --out-dir ./myjob/
+  --name myjob --out-dir ./myjob/
 
 # Screen 3 SMILES variants against a protein → 3 YAMLs + job.sh
 boltz-setup-yaml --protein MVHLTPEEK --smiles "c1ccccc1|CC(=O)O|c1ccc(O)cc1" \
@@ -221,7 +221,7 @@ boltz-setup-yaml --protein MVHLTPEEK --smiles "c1ccccc1|CC(=O)O|c1ccc(O)cc1" \
 # Screen all sequences in a FASTA against a fixed ligand
 boltz-setup-yaml --protein @seqs.fasta --smiles "c1ccccc1" \
   --affinity B --pocket-binder B --pocket-contacts A:96,A:100 \
-  --use-msa-server --name screen --out-dir ./screen/
+  --name screen --out-dir ./screen/
 
 # Heterodimer + CCD ligand (chains A, B, C)
 boltz-setup-yaml --protein MVHLT --protein MAIMILIANFR --ccd FAD \
@@ -236,7 +236,7 @@ boltz-setup-yaml \
   --ccd UPG \
   --affinity E \
   --pocket-binder E --pocket-contacts A:96,A:100 \
-  --diffusion-samples 10 --use-msa-server --use-potentials \
+  --diffusion-samples 10 --use-potentials \
   --name screen --out-dir ./screen/
 
 # Override Slurm settings
@@ -298,7 +298,7 @@ Partition is chosen to fit the estimated wall time (`gpushort` ≤4h, `gpumedium
 ```bash
 # 1. Generate job directory (locally)
 boltz-setup-yaml --protein @targets.fasta --smiles "$(cat ligand.smi)" \
-  --affinity B --use-msa-server --name screen --out-dir ./screen/
+  --affinity B --name screen --out-dir ./screen/
 
 # 2. Submit to cluster (uploads files + runs sbatch via SSH)
 hpc-submit screen/job.sh
