@@ -31,15 +31,31 @@ pip install pyyaml
 ## Cluster configuration
 
 On first run, `boltz-setup-yaml` writes `~/.config/boltz-setup/config.yaml`
-with annotated defaults. Edit it to match your HPC environment:
+with annotated defaults. Edit it to match your HPC environment, or run
+`boltz-setup-yaml --init` to auto-detect the boltz binary and model cache
+via SSH:
+
+```bash
+boltz-setup-yaml --init
+```
+
+This SSHs to your cluster (using `$hpc`/`$HPC` env var or your SSH config),
+runs a login shell to find the `boltz` binary and model cache under common
+storage locations (`$SCRATCH`, `$WORK`, `$DATA`, etc.), and writes the
+detected paths to config.
+
+Key config fields:
 
 ```yaml
 # Python module loaded in every job script
 python_module: Python/3.11.5-GCCcore-13.2.0
 
+# boltz binary name or path on the cluster (auto-detected by --init)
+boltz_bin: boltz
+
 # Scratch paths ({user} is replaced with your cluster username)
 scratch_dir: /scratch/{user}
-cache_dir: /scratch/{user}/boltz
+cache_dir: /scratch/{user}/boltz      # auto-detected by --init
 jobs_dir: /scratch/{user}/boltz_jobs
 
 # GPU recommendation tiers (first entry where tokens <= max_tokens wins)
@@ -197,8 +213,9 @@ Auto-recommended from sequence length and boltz parameters if omitted. Override 
 | Flag | Default | Description |
 |---|---|---|
 | `--out-dir DIR` | — | Directory for `input/*.yaml` + `job.sh`. Required unless `--stdout` |
-| `--name NAME` | `job` | Prefix for YAML filenames and Slurm `--job-name` |
+| `--name NAME` | out-dir basename | Prefix for YAML filenames and Slurm `--job-name` |
 | `--stdout` | off | Print YAML to stdout only (single-YAML; no job script) |
+| `--init` | — | SSH to cluster, auto-detect boltz binary and model cache, update config |
 
 ### Examples
 
@@ -257,6 +274,7 @@ Each job directory contains:
     <name>.yaml                  # boltz input (entities, constraints, properties)
     <name>_pAv1_lB.yaml          # variant YAMLs for screening jobs
     <name>_pAv2_lB.yaml
+  boltz_tools/                   # copy of the boltz_tools package (for log parsing on cluster)
   job.sh                         # Slurm submission script (self-renames to job_<id>.sh on start)
   slurm-<jobid>.out              # raw Slurm output
   <name>_COMPLETED_<jobid>.log   # clean summary (auto-generated at job end)
