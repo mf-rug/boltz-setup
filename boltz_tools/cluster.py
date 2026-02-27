@@ -20,25 +20,71 @@ CONFIG_PATH = Path.home() / ".config" / "boltz-setup" / "config.yaml"
 # Cluster username detection
 # ---------------------------------------------------------------------------
 
+def _resolve_ssh_user(target: str) -> Optional[str]:
+    """Resolve the remote username for an SSH target (alias or user@host).
+
+    Uses ``ssh -G`` to query the effective config without connecting.
+    Returns the username or None if resolution fails.
+    """
+    if "@" in target:
+        return target.split("@")[0]
+    try:
+        result = subprocess.run(
+            ["ssh", "-G", target],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                if line.lower().startswith("user "):
+                    return line.split(None, 1)[1]
+    except Exception:
+        pass
+    return None
+
+
 def _cluster_user() -> str:
     """Return the cluster username, derived from (in priority order):
-    1. hpc / HPC env var (user@host) — if exported to the environment
-    2. rsyncer config (~/.config/rsyncer/config.json → "server" field)
-    3. $LOGNAME / $USER fallback
+    1. hpc / HPC env var (user@host or SSH alias)
+    2. hpc-submit config (~/.config/hpc-submit/config.yaml → remote_host)
+    3. rsyncer config (~/.config/rsyncer/config.json → server)
+    4. $LOGNAME / $USER fallback
     """
+    # 1. Environment variable
     for var in ("hpc", "HPC"):
-        val = os.environ.get(var, "")
-        if "@" in val:
-            return val.split("@")[0]
+        val = os.environ.get(var, "").strip()
+        if val:
+            user = _resolve_ssh_user(val)
+            if user:
+                return user
+
+    # 2. hpc-submit config
+    try:
+        hpc_cfg = Path.home() / ".config" / "hpc-submit" / "config.yaml"
+        if hpc_cfg.exists():
+            import yaml
+            cfg = yaml.safe_load(hpc_cfg.read_text())
+            host = cfg.get("remote_host", "")
+            if host:
+                user = _resolve_ssh_user(host)
+                if user:
+                    return user
+    except Exception:
+        pass
+
+    # 3. rsyncer config
     try:
         rsyncer_cfg = Path.home() / ".config" / "rsyncer" / "config.json"
         if rsyncer_cfg.exists():
             cfg = json.loads(rsyncer_cfg.read_text())
             server = cfg.get("server", "")
-            if "@" in server:
-                return server.split("@")[0]
+            if server:
+                user = _resolve_ssh_user(server)
+                if user:
+                    return user
     except Exception:
         pass
+
+    # 4. Fallback
     return os.environ.get("LOGNAME") or os.environ.get("USER", "user")
 
 

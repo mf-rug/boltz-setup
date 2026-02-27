@@ -16,9 +16,13 @@ Key settings:
 - `epilog_marker` — string that marks the cluster's job-end epilog in Slurm logs
 
 The cluster username is detected from (in priority order):
-1. `$hpc` / `$HPC` env var (user@host format)
-2. `~/.config/rsyncer/config.json` → `server` field
-3. `$LOGNAME` / `$USER`
+1. `$hpc` / `$HPC` env var (user@host or SSH alias — resolved via `ssh -G`)
+2. `~/.config/hpc-submit/config.yaml` → `remote_host` field
+3. `~/.config/rsyncer/config.json` → `server` field
+4. `$LOGNAME` / `$USER`
+
+SSH aliases (e.g. `hpc`) are resolved to a username via `ssh -G <alias>` which
+queries the SSH config without connecting.
 
 ## What Boltz Does
 
