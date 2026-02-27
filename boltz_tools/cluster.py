@@ -304,6 +304,19 @@ def remote_detect(ssh_target: str) -> Dict[str, Any]:
 
     if result.returncode != 0:
         msg = result.stderr.strip() or f"exit code {result.returncode}"
+        # Re-run with -v to get connection diagnostics and append to the error.
+        try:
+            verbose = subprocess.run(
+                ["ssh", "-v", "-o", "ConnectTimeout=10",
+                 "-o", "StrictHostKeyChecking=accept-new",
+                 ssh_target, "exit"],
+                capture_output=True, text=True, timeout=30,
+            )
+            diag = (verbose.stderr or "").strip()
+        except Exception:
+            diag = ""
+        if diag:
+            msg = f"{msg}\n\nSSH diagnostics (-v):\n{diag}"
         return {"boltz_bin": None, "cache_dir": None, "storage": {}, "error": msg}
 
     boltz_bin = None
