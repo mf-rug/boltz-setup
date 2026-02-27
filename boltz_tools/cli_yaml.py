@@ -579,5 +579,6 @@ examples:
         f"  Slurm: partition={partition}  time={time_str}  "
         f"gpu={gpu_sbatch}  mem={mem}"
     )
+    print(f"  Cache: {BOLTZ_CACHE_DIR}")
     print(f"\nTo submit:")
     print(f"  hpc-submit {out_dir}/job.sh")

@@ -84,8 +84,17 @@ def _cluster_user() -> str:
     except Exception:
         pass
 
-    # 4. Fallback
-    return os.environ.get("LOGNAME") or os.environ.get("USER", "user")
+    # 4. Fallback — warn, because this is almost certainly wrong on a cluster
+    fallback = os.environ.get("LOGNAME") or os.environ.get("USER", "user")
+    import sys
+    print(
+        f"[boltz-setup] WARNING: could not detect cluster username — "
+        f"falling back to local user '{fallback}'.\n"
+        f"  Set $hpc (e.g. export hpc=user@cluster) or run hpc-submit --init first.\n"
+        f"  Or edit ~/.config/boltz-setup/config.yaml to set paths manually.",
+        file=sys.stderr,
+    )
+    return fallback
 
 
 # ---------------------------------------------------------------------------
