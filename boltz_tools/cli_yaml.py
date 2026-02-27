@@ -35,7 +35,7 @@ from .generate import (
     validate_rna_sequence,
     validate_smiles,
 )
-from .cluster import BOLTZ_CACHE_DIR, PYTHON_MODULE
+from .cluster import BOLTZ_BIN, BOLTZ_CACHE_DIR, PYTHON_MODULE
 
 
 # ---------------------------------------------------------------------------
@@ -347,8 +347,18 @@ examples:
         "--stdout", action="store_true",
         help="Print YAML to stdout only (single-YAML; no job script written).",
     )
+    out_grp.add_argument(
+        "--init", action="store_true",
+        help="Detect boltz binary and model cache on the cluster via SSH, then update config.",
+    )
 
     args = parser.parse_args()
+
+    # --init: SSH detection, then exit
+    if args.init:
+        from .cluster import run_init
+        run_init()
+        return
 
     # Validate output mode
     if not args.stdout and not args.out_dir:
@@ -550,6 +560,7 @@ examples:
         boltz_params=bp,
         slurm_params=slurm_params,
         python_module=PYTHON_MODULE,
+        boltz_bin=BOLTZ_BIN,
     )
     job_sh = out_dir / "job.sh"
     job_sh.write_text(job_script)
@@ -580,5 +591,7 @@ examples:
         f"gpu={gpu_sbatch}  mem={mem}"
     )
     print(f"  Cache: {BOLTZ_CACHE_DIR}")
+    if BOLTZ_BIN != "boltz":
+        print(f"  Boltz: {BOLTZ_BIN}")
     print(f"\nTo submit:")
     print(f"  hpc-submit {out_dir}/job.sh")

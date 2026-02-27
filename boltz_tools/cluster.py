@@ -11,6 +11,8 @@ Run `boltz-setup-yaml --init` to (re)write the config interactively.
 import json
 import os
 import subprocess
+import sys
+import textwrap
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -86,7 +88,6 @@ def _cluster_user() -> str:
 
     # 4. Fallback — warn, because this is almost certainly wrong on a cluster
     fallback = os.environ.get("LOGNAME") or os.environ.get("USER", "user")
-    import sys
     print(
         f"[boltz-setup] WARNING: could not detect cluster username — "
         f"falling back to local user '{fallback}'.\n"
@@ -97,11 +98,49 @@ def _cluster_user() -> str:
     return fallback
 
 
+def _get_ssh_target() -> Optional[str]:
+    """Return the SSH target for the cluster (alias or user@host).
+
+    Checks (in priority order):
+    1. $hpc / $HPC env var
+    2. hpc-submit config → remote_host
+    3. rsyncer config → server
+    """
+    for var in ("hpc", "HPC"):
+        val = os.environ.get(var, "").strip()
+        if val:
+            return val
+    try:
+        hpc_cfg = Path.home() / ".config" / "hpc-submit" / "config.yaml"
+        if hpc_cfg.exists():
+            import yaml
+            cfg = yaml.safe_load(hpc_cfg.read_text())
+            host = cfg.get("remote_host", "")
+            if host:
+                return host
+    except Exception:
+        pass
+    try:
+        rsyncer_cfg = Path.home() / ".config" / "rsyncer" / "config.json"
+        if rsyncer_cfg.exists():
+            cfg = json.loads(rsyncer_cfg.read_text())
+            server = cfg.get("server", "")
+            if server:
+                return server
+    except Exception:
+        pass
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Default configuration (Hábrók / RUG HPC — edit config.yaml to override)
 # ---------------------------------------------------------------------------
 
 _DEFAULTS: Dict[str, Any] = {
+    # Full path to the boltz binary on the cluster (auto-detected by --init)
+    # "boltz" works if it is on PATH after module load; set to absolute path if not.
+    "boltz_bin": "boltz",
+
     # 'module load <python_module>' in every job script
     "python_module": "Python/3.11.5-GCCcore-13.2.0",
 
@@ -164,17 +203,27 @@ def _load_config() -> Dict[str, Any]:
     return dict(_DEFAULTS)
 
 
+def _write_config(cfg: Dict[str, Any]) -> None:
+    """Write a config dict to CONFIG_PATH."""
+    import yaml
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    header = (
+        "# boltz-setup cluster configuration\n"
+        "# Edit to match your HPC environment.\n"
+        "# Re-run `boltz-setup-yaml --init` to detect boltz and cache on the cluster.\n\n"
+    )
+    CONFIG_PATH.write_text(header + yaml.dump(cfg, default_flow_style=False, allow_unicode=True))
+
+
 def _write_default_config() -> None:
-    """Write the default config to disk so users can customise it."""
+    """Write the default config to disk and hint about --init."""
     try:
-        import yaml
-        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        header = (
-            "# boltz-setup cluster configuration\n"
-            "# Edit to match your HPC environment.\n"
-            "# Re-run `boltz-setup-yaml --init` to regenerate from scratch.\n\n"
+        _write_config(dict(_DEFAULTS))
+        print(
+            f"[boltz-setup] Config created at {CONFIG_PATH}\n"
+            "  Run `boltz-setup-yaml --init` to auto-detect boltz and the model cache on the cluster.",
+            file=sys.stderr,
         )
-        CONFIG_PATH.write_text(header + yaml.dump(_DEFAULTS, default_flow_style=False, allow_unicode=True))
     except Exception:
         pass  # yaml not available locally; silently skip
 
@@ -190,12 +239,151 @@ def _expand(s: str) -> str:
     return s.replace("{user}", _user)
 
 PYTHON_MODULE: str     = _cfg["python_module"]
+BOLTZ_BIN: str         = _cfg.get("boltz_bin", "boltz")
 SCRATCH: str           = _expand(_cfg["scratch_dir"])
 BOLTZ_CACHE_DIR: str   = _expand(_cfg["cache_dir"])
 BOLTZ_JOBS_DIR: str    = _expand(_cfg["jobs_dir"])
 GPU_TIERS: List[Dict]  = _cfg["gpu_tiers"]
 PARTITIONS: List[Dict] = _cfg["partitions"]
 EPILOG_MARKER: str     = _cfg.get("epilog_marker", "")
+
+
+# ---------------------------------------------------------------------------
+# Remote detection (SSH-based, called by --init)
+# ---------------------------------------------------------------------------
+
+# Env var names commonly set by HPC sysadmins to point to user storage
+_STORAGE_VARS = ("SCRATCH", "WORK", "DATA", "PROJECT", "LUSTRE", "TMPDIR")
+
+
+def remote_detect(ssh_target: str) -> Dict[str, Any]:
+    """SSH to the cluster and detect the boltz binary and model cache.
+
+    Runs a login shell (bash -l) so that module-system env vars and
+    sysadmin-set storage vars ($SCRATCH, $WORK, …) are visible.
+    Uses BatchMode=yes so it never hangs waiting for a password —
+    it relies on an active SSH ControlMaster or key-based auth.
+
+    Returns a dict with:
+        boltz_bin:  str | None  — absolute path to the boltz binary
+        cache_dir:  str | None  — path to the model cache (contains boltz2_conf.ckpt)
+        storage:    dict        — storage env vars found on the remote
+        error:      str | None  — error message if SSH failed
+    """
+    # One-shot script: print env, find boltz, search for cache under storage vars
+    script = textwrap.dedent("""\
+        env
+        _b=$(which boltz 2>/dev/null || find "$HOME/.local/bin" -name boltz -maxdepth 1 2>/dev/null | head -1)
+        echo "BOLTZ_SETUP_BIN=${_b}"
+        if [ -n "$_b" ]; then
+            for _dir in "$SCRATCH" "$WORK" "$DATA" "$PROJECT" "$LUSTRE" "$HOME"; do
+                [ -z "$_dir" ] && continue
+                for _sfx in "/boltz" "/.boltz" ""; do
+                    _p="${_dir}${_sfx}"
+                    [ -f "${_p}/boltz2_conf.ckpt" ] || continue
+                    echo "BOLTZ_SETUP_CACHE=${_p}"
+                    break 2
+                done
+            done
+        fi
+    """)
+    try:
+        result = subprocess.run(
+            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+             ssh_target, "bash", "-l"],
+            input=script, capture_output=True, text=True, timeout=30,
+        )
+    except Exception as e:
+        return {"boltz_bin": None, "cache_dir": None, "storage": {}, "error": str(e)}
+
+    if result.returncode != 0:
+        msg = result.stderr.strip() or f"exit code {result.returncode}"
+        return {"boltz_bin": None, "cache_dir": None, "storage": {}, "error": msg}
+
+    boltz_bin = None
+    cache_dir = None
+    storage: Dict[str, str] = {}
+
+    for line in result.stdout.splitlines():
+        key, sep, val = line.partition("=")
+        if not sep:
+            continue
+        if key == "BOLTZ_SETUP_BIN":
+            boltz_bin = val.strip() or None
+        elif key == "BOLTZ_SETUP_CACHE":
+            cache_dir = val.strip() or None
+        elif key in _STORAGE_VARS:
+            storage[key] = val
+
+    return {"boltz_bin": boltz_bin, "cache_dir": cache_dir, "storage": storage, "error": None}
+
+
+def run_init() -> None:
+    """Interactive --init: SSH to the cluster to detect boltz and its model cache,
+    then write (or update) ~/.config/boltz-setup/config.yaml.
+    """
+    print("boltz-setup: cluster detection")
+    print("=" * 40)
+
+    # Resolve SSH target
+    ssh_target = _get_ssh_target()
+    if not ssh_target:
+        ssh_target = input("SSH target (e.g. 'hpc' or 'user@cluster.example.com'): ").strip()
+        if not ssh_target:
+            print("Aborted.", file=sys.stderr)
+            return
+
+    print(f"Connecting to {ssh_target} ...")
+    detected = remote_detect(ssh_target)
+
+    if detected["error"]:
+        print(f"\nSSH failed: {detected['error']}", file=sys.stderr)
+        print(
+            "Make sure an SSH ControlMaster session is open (`ssh hpc`) "
+            "or key-based auth works without interaction.",
+            file=sys.stderr,
+        )
+        return
+
+    # --- Boltz binary ---
+    boltz_bin = detected["boltz_bin"]
+    if boltz_bin:
+        print(f"  boltz binary : {boltz_bin}")
+    else:
+        print("  boltz binary : NOT FOUND", file=sys.stderr)
+        print("  → Install on the cluster with: pip install --user boltz", file=sys.stderr)
+        boltz_bin = "boltz"  # keep default; job will fail with clear error at runtime
+
+    # --- Cache directory ---
+    cache_dir = detected["cache_dir"]
+    if cache_dir:
+        print(f"  model cache  : {cache_dir}")
+    else:
+        if boltz_bin != "boltz":
+            print("  model cache  : not found (models not yet downloaded)")
+        # Build a suggestion from the first available storage var
+        storage = detected["storage"]
+        suggestion = None
+        for var in _STORAGE_VARS:
+            if var in storage:
+                suggestion = f"{storage[var]}/boltz"
+                break
+        if not suggestion:
+            suggestion = _expand(_DEFAULTS["cache_dir"])  # fallback to {user} default
+
+        cache_dir_input = input(f"  Cache path on cluster [{suggestion}]: ").strip()
+        cache_dir = cache_dir_input or suggestion
+
+    # Load existing config (preserve gpu_tiers, partitions, etc.) and update
+    cfg = _load_config()
+    cfg["boltz_bin"] = boltz_bin
+    cfg["cache_dir"] = cache_dir  # absolute path — no {user} substitution needed
+
+    try:
+        _write_config(cfg)
+        print(f"\nConfig updated: {CONFIG_PATH}")
+    except Exception as e:
+        print(f"Failed to write config: {e}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------

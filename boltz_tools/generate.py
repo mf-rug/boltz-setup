@@ -752,16 +752,20 @@ def build_job_script(
     boltz_params: BoltzParams,
     slurm_params: SlurmParams,
     python_module: Optional[str] = None,
+    boltz_bin: Optional[str] = None,
 ) -> str:
     """Build a Slurm job script for boltz predict."""
     if python_module is None:
         from .cluster import PYTHON_MODULE
         python_module = PYTHON_MODULE
+    if boltz_bin is None:
+        from .cluster import BOLTZ_BIN
+        boltz_bin = BOLTZ_BIN
     flag_list = _boltz_flags(boltz_params)
 
     # Build multi-line boltz command for readability
     boltz_parts = [
-        "boltz predict ./input/",
+        f"{boltz_bin} predict ./input/",
         "    --out_dir ./output/",
         f"    --cache {cache_dir}",
     ]
