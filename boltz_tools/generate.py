@@ -401,6 +401,7 @@ def recommend_gpu(total_tokens: int) -> Dict:
         "gpu_sbatch": tier["gpu_sbatch"],
         "mem": tier["mem"],
         "boltz_extra_flags": tier.get("extra_flags", []),
+        "venv": tier.get("venv"),
         "warnings": warnings,
     }
 
@@ -753,6 +754,7 @@ def build_job_script(
     slurm_params: SlurmParams,
     python_module: Optional[str] = None,
     boltz_bin: Optional[str] = None,
+    venv: Optional[str] = None,
 ) -> str:
     """Build a Slurm job script for boltz predict."""
     if python_module is None:
@@ -763,9 +765,16 @@ def build_job_script(
         boltz_bin = BOLTZ_BIN
     flag_list = _boltz_flags(boltz_params)
 
+    # When a venv is active, use python -c to bypass the hardcoded shebang
+    # in the boltz script, ensuring the venv's Python (correct PyTorch) is used.
+    if venv:
+        boltz_invoke = 'python -c "from boltz.main import cli; cli()"'
+    else:
+        boltz_invoke = boltz_bin
+
     # Build multi-line boltz command for readability
     boltz_parts = [
-        f"{boltz_bin} predict ./input/",
+        f"{boltz_invoke} predict ./input/",
         "    --out_dir ./output/",
         f"    --cache {cache_dir}",
     ]
@@ -819,8 +828,11 @@ echo "start $(date)"
 
 module purge
 module load {python_module}
-
-# GPU diagnostics
+{f"""
+# Activate venv (Blackwell GPU support)
+source {venv}/bin/activate
+""" if venv else """
+"""}# GPU diagnostics
 nvidia-smi
 
 # Memory optimization

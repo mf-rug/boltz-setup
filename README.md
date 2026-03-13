@@ -66,8 +66,8 @@ gpu_tiers:
 
 # Slurm partitions (shortest first)
 partitions:
-  - {name: gpushort,  max_hours: 4,  gpus: [v100:1, a100:1, l40s:1]}
-  - {name: gpumedium, max_hours: 24, gpus: [v100:1, a100:1]}
+  - {name: gpushort,  max_hours: 4,  gpus: [v100:1, a100:1, l40s:1, rtx_pro_6000:1]}
+  - {name: gpumedium, max_hours: 24, gpus: [v100:1, a100:1, rtx_pro_6000:1]}
   ...
 ```
 
@@ -305,7 +305,7 @@ Both tools estimate the total token count (residues + ligand heavy atoms across 
 | < 700 | V100 | 16 GB | `--no_kernels` added automatically |
 | 700–1500 | L40s | 32 GB | |
 | 1500–2500 | A100 | 32 GB | |
-| > 2500 | A100 | 64 GB | Warning: consider splitting |
+| > 2500 | RTX Pro 6000 | 64 GB | 96 GB VRAM; warning: consider splitting |
 
 Partition is chosen to fit the estimated wall time (`gpushort` ≤4h, `gpumedium` ≤1day, `gpulong` ≤3days). GPU type is upgraded automatically if the recommended GPU isn't available on the required partition.
 

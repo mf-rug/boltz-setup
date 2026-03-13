@@ -165,17 +165,19 @@ _DEFAULTS: Dict[str, Any] = {
          "extra_flags": []},
         {"max_tokens": 2500,    "gpu_sbatch": "a100:1", "mem": "32GB",
          "extra_flags": []},
-        {"max_tokens": 9_999_999, "gpu_sbatch": "a100:1", "mem": "64GB",
-         "extra_flags": [], "warn": True},
+        {"max_tokens": 9_999_999, "gpu_sbatch": "rtx_pro_6000:1", "mem": "64GB",
+         "extra_flags": [], "warn": True,
+         "venv": "/scratch/{user}/venvs/boltz-blackwell",
+         "venv_pip": "torch --index-url https://download.pytorch.org/whl/cu128"},
     ],
 
     # Slurm partitions: listed in priority order (shortest first).
     # max_hours: wall-time limit for this partition
     # gpus: gpu_sbatch values available on this partition
     "partitions": [
-        {"name": "gpushort",  "max_hours": 4,  "gpus": ["v100:1", "a100:1", "l40s:1", "rtxpro6000:1"]},
-        {"name": "gpumedium", "max_hours": 24, "gpus": ["v100:1", "a100:1", "rtxpro6000:1"]},
-        {"name": "gpulong",   "max_hours": 72, "gpus": ["v100:1", "a100:1", "rtxpro6000:1"]},
+        {"name": "gpushort",  "max_hours": 4,  "gpus": ["v100:1", "a100:1", "l40s:1", "rtx_pro_6000:1"]},
+        {"name": "gpumedium", "max_hours": 24, "gpus": ["v100:1", "a100:1", "rtx_pro_6000:1"]},
+        {"name": "gpulong",   "max_hours": 72, "gpus": ["v100:1", "a100:1", "rtx_pro_6000:1"]},
     ],
 
     # String that marks the start of the cluster epilog block in Slurm logs.
@@ -187,6 +189,26 @@ _DEFAULTS: Dict[str, Any] = {
 # Config loading
 # ---------------------------------------------------------------------------
 
+def _merge_gpu_tiers(user_tiers: List[Dict], default_tiers: List[Dict]) -> List[Dict]:
+    """Merge default GPU tier fields into user-provided tiers.
+
+    Matches tiers by gpu_sbatch value. Default fields (like venv, venv_pip)
+    are added to user tiers that don't explicitly set them.
+    """
+    defaults_by_gpu = {t["gpu_sbatch"]: t for t in default_tiers}
+    merged = []
+    for tier in user_tiers:
+        gpu = tier.get("gpu_sbatch")
+        if gpu and gpu in defaults_by_gpu:
+            # Start with defaults, overlay user values
+            m = dict(defaults_by_gpu[gpu])
+            m.update(tier)
+            merged.append(m)
+        else:
+            merged.append(tier)
+    return merged
+
+
 def _load_config() -> Dict[str, Any]:
     """Load ~/.config/boltz-setup/config.yaml, writing defaults if absent."""
     if CONFIG_PATH.exists():
@@ -196,6 +218,9 @@ def _load_config() -> Dict[str, Any]:
             # Deep-merge: top-level keys from file override defaults
             merged = dict(_DEFAULTS)
             merged.update(raw)
+            # Deep-merge gpu_tiers so default fields (venv, venv_pip) persist
+            if "gpu_tiers" in raw:
+                merged["gpu_tiers"] = _merge_gpu_tiers(raw["gpu_tiers"], _DEFAULTS["gpu_tiers"])
             return merged
         except Exception:
             pass
@@ -245,6 +270,9 @@ SCRATCH: str           = _expand(_cfg["scratch_dir"])
 BOLTZ_CACHE_DIR: str   = _expand(_cfg["cache_dir"])
 BOLTZ_JOBS_DIR: str    = _expand(_cfg["jobs_dir"])
 GPU_TIERS: List[Dict]  = _cfg["gpu_tiers"]
+for _tier in GPU_TIERS:
+    if "venv" in _tier and _tier["venv"]:
+        _tier["venv"] = _expand(_tier["venv"])
 PARTITIONS: List[Dict] = _cfg["partitions"]
 EPILOG_MARKER: str     = _cfg.get("epilog_marker", "")
 
@@ -277,7 +305,7 @@ def remote_detect(ssh_target: str) -> Dict[str, Any]:
         _b=$(which boltz 2>/dev/null || find "$HOME/.local/bin" -name boltz -maxdepth 1 2>/dev/null | head -1)
         echo "BOLTZ_SETUP_BIN=${_b}"
         if [ -n "$_b" ]; then
-            for _dir in "$SCRATCH" "$WORK" "$DATA" "$PROJECT" "$LUSTRE" "$HOME"; do
+            for _dir in "$SCRATCH" "$WORK" "$DATA" "$PROJECT" "$LUSTRE" "/scratch/$USER" "$HOME"; do
                 [ -z "$_dir" ] && continue
                 for _sfx in "/boltz" "/.boltz" ""; do
                     _p="${_dir}${_sfx}"
@@ -403,6 +431,68 @@ def run_init() -> None:
         print(f"\nConfig updated: {CONFIG_PATH}")
     except Exception as e:
         print(f"Failed to write config: {e}", file=sys.stderr)
+
+    # --- Venv creation for GPU tiers that require one ---
+    seen_venvs: set = set()
+    for tier in cfg.get("gpu_tiers", []):
+        venv_raw = tier.get("venv")
+        venv_pip = tier.get("venv_pip")
+        if not venv_raw or not venv_pip:
+            continue
+        venv_path = venv_raw.replace("{user}", _user)
+        if venv_path in seen_venvs:
+            continue
+        seen_venvs.add(venv_path)
+
+        # Check if venv already exists on the cluster
+        print(f"\nChecking venv: {venv_path} ...")
+        check_cmd = f"test -f {venv_path}/bin/activate && echo EXISTS || echo MISSING"
+        try:
+            result = subprocess.run(
+                ["ssh", "-o", "ConnectTimeout=10", ssh_target, check_cmd],
+                capture_output=True, text=True, timeout=15,
+            )
+            exists = "EXISTS" in result.stdout
+        except Exception:
+            print(f"  Could not check venv (SSH error). Skipping.", file=sys.stderr)
+            continue
+
+        if exists:
+            print(f"  venv exists   : {venv_path}")
+            continue
+
+        # Create the venv
+        gpu_name = tier.get("gpu_sbatch", "GPU").split(":")[0]
+        print(f"  Creating venv for {gpu_name} support ...")
+        print(f"  This downloads PyTorch (~2-3 GB) — may take a few minutes.")
+        python_module = cfg.get("python_module", _DEFAULTS["python_module"])
+        create_script = (
+            f"set -e && "
+            f"module load {python_module} && "
+            f"python -m venv --system-site-packages {venv_path} && "
+            f"source {venv_path}/bin/activate && "
+            f"pip install --quiet {venv_pip}"
+        )
+        try:
+            result = subprocess.run(
+                ["ssh", "-o", "ConnectTimeout=10", ssh_target,
+                 f"bash -l -c {_shell_quote(create_script)}"],
+                capture_output=False, text=True, timeout=600,
+            )
+            if result.returncode == 0:
+                print(f"  venv created  : {venv_path}")
+            else:
+                print(f"  venv creation failed (exit code {result.returncode}).", file=sys.stderr)
+        except subprocess.TimeoutExpired:
+            print(f"  venv creation timed out (10 min limit).", file=sys.stderr)
+        except Exception as e:
+            print(f"  venv creation failed: {e}", file=sys.stderr)
+
+
+def _shell_quote(s: str) -> str:
+    """Shell-quote a string for passing via SSH."""
+    import shlex
+    return shlex.quote(s)
 
 
 # ---------------------------------------------------------------------------

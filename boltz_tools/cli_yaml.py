@@ -541,6 +541,18 @@ examples:
     gpu_sbatch = args.gpu or gpu_rec["gpu_sbatch"]
     mem = args.mem or gpu_rec["mem"]
 
+    # Resolve venv: when --gpu overrides the recommendation, look up the
+    # matching tier's venv instead of using the auto-recommended one.
+    if args.gpu:
+        from .cluster import GPU_TIERS
+        venv = None
+        for t in GPU_TIERS:
+            if t["gpu_sbatch"] == args.gpu:
+                venv = t.get("venv")
+                break
+    else:
+        venv = gpu_rec.get("venv")
+
     slurm_params = SlurmParams(
         job_name=args.name,
         time=time_str,
@@ -561,6 +573,7 @@ examples:
         slurm_params=slurm_params,
         python_module=PYTHON_MODULE,
         boltz_bin=BOLTZ_BIN,
+        venv=venv,
     )
     job_sh = out_dir / "job.sh"
     job_sh.write_text(job_script)
@@ -591,6 +604,8 @@ examples:
         f"gpu={gpu_sbatch}  mem={mem}"
     )
     print(f"  Cache: {BOLTZ_CACHE_DIR}")
+    if venv:
+        print(f"  Venv:  {venv}")
     if BOLTZ_BIN != "boltz":
         print(f"  Boltz: {BOLTZ_BIN}")
     print(f"\nTo submit:")
