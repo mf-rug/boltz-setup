@@ -471,7 +471,7 @@ def run_init() -> None:
             f"module load {python_module} && "
             f"python -m venv --system-site-packages {venv_path} && "
             f"source {venv_path}/bin/activate && "
-            f"pip install --upgrade {venv_pip}"
+            f"pip install -v --upgrade {venv_pip}"
         )
         try:
             result = subprocess.run(
