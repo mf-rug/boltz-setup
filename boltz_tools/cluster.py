@@ -471,11 +471,13 @@ def run_init() -> None:
             f"module load {python_module} && "
             f"python -m venv --system-site-packages {venv_path} && "
             f"source {venv_path}/bin/activate && "
-            f"pip install --quiet --upgrade {venv_pip}"
+            f"pip install --upgrade {venv_pip}"
         )
         try:
             result = subprocess.run(
-                ["ssh", "-o", "ConnectTimeout=10", ssh_target,
+                ["ssh", "-o", "ConnectTimeout=10",
+                 "-o", "ServerAliveInterval=30",
+                 ssh_target,
                  f"bash -l -c {_shell_quote(create_script)}"],
                 capture_output=False, text=True, timeout=600,
             )
