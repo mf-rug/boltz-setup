@@ -466,12 +466,18 @@ def run_init() -> None:
         print(f"  Creating venv for {gpu_name} support ...")
         print(f"  This downloads PyTorch (~2-3 GB) — may take a few minutes.")
         python_module = cfg.get("python_module", _DEFAULTS["python_module"])
+        _log = f"{venv_path}/pip-install.log"
         create_script = (
             f"set -e && "
             f"module load {python_module} && "
             f"python -m venv --system-site-packages {venv_path} && "
             f"source {venv_path}/bin/activate && "
-            f"pip install -v --upgrade {venv_pip}"
+            f"nohup pip install --upgrade {venv_pip} > {_log} 2>&1 & "
+            f"PID=$! && "
+            f"while kill -0 $PID 2>/dev/null; do "
+            f"  tail -1 {_log} 2>/dev/null; sleep 5; "
+            f"done && "
+            f"wait $PID"
         )
         try:
             result = subprocess.run(
