@@ -476,7 +476,7 @@ def run_init() -> None:
             result = subprocess.run(
                 ["ssh", "-o", "ConnectTimeout=10", ssh_target,
                  f"bash -l -c {_shell_quote(venv_create_script)}"],
-                capture_output=True, text=True, timeout=60,
+                capture_output=True, text=True, timeout=300,
             )
             if result.returncode != 0:
                 print(f"  venv creation failed: {result.stderr.strip()}", file=sys.stderr)
