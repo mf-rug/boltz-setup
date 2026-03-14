@@ -461,40 +461,99 @@ def run_init() -> None:
             print(f"  venv exists   : {venv_path}")
             continue
 
-        # Create the venv
+        # Create the venv (venv itself on login node, pip install via Slurm)
         gpu_name = tier.get("gpu_sbatch", "GPU").split(":")[0]
-        print(f"  Creating venv for {gpu_name} support ...")
-        print(f"  This downloads PyTorch (~2-3 GB) — may take a few minutes.")
         python_module = cfg.get("python_module", _DEFAULTS["python_module"])
-        _log = f"{venv_path}/pip-install.log"
-        create_script = (
+
+        # Step 1: create the venv on the login node (lightweight)
+        print(f"\n  Creating venv for {gpu_name} support ...")
+        venv_create_script = (
             f"set -e && "
             f"module load {python_module} && "
-            f"python -m venv --system-site-packages {venv_path} && "
-            f"source {venv_path}/bin/activate && "
-            f"nohup pip install --upgrade {venv_pip} > {_log} 2>&1 & "
-            f"PID=$! && "
-            f"while kill -0 $PID 2>/dev/null; do "
-            f"  tail -1 {_log} 2>/dev/null; sleep 5; "
-            f"done && "
-            f"wait $PID"
+            f"python -m venv --system-site-packages {venv_path}"
         )
         try:
             result = subprocess.run(
-                ["ssh", "-o", "ConnectTimeout=10",
-                 "-o", "ServerAliveInterval=30",
-                 ssh_target,
-                 f"bash -l -c {_shell_quote(create_script)}"],
-                capture_output=False, text=True, timeout=600,
+                ["ssh", "-o", "ConnectTimeout=10", ssh_target,
+                 f"bash -l -c {_shell_quote(venv_create_script)}"],
+                capture_output=True, text=True, timeout=60,
             )
-            if result.returncode == 0:
-                print(f"  venv created  : {venv_path}")
-            else:
-                print(f"  venv creation failed (exit code {result.returncode}).", file=sys.stderr)
-        except subprocess.TimeoutExpired:
-            print(f"  venv creation timed out (10 min limit).", file=sys.stderr)
+            if result.returncode != 0:
+                print(f"  venv creation failed: {result.stderr.strip()}", file=sys.stderr)
+                continue
         except Exception as e:
             print(f"  venv creation failed: {e}", file=sys.stderr)
+            continue
+
+        # Step 2: pip install via a Slurm job (login node kills large installs)
+        print(f"  Installing PyTorch via Slurm job (~2-3 GB download) ...")
+        _log = f"{venv_path}/pip-install.log"
+        pip_job_script = (
+            f"#!/bin/bash\\n"
+            f"#SBATCH --job-name=venv-setup\\n"
+            f"#SBATCH --partition=regular\\n"
+            f"#SBATCH --time=00:15:00\\n"
+            f"#SBATCH --cpus-per-task=2\\n"
+            f"#SBATCH --mem=8GB\\n"
+            f"#SBATCH --output={_log}\\n"
+            f"module load {python_module}\\n"
+            f"source {venv_path}/bin/activate\\n"
+            f"pip install --upgrade {venv_pip}\\n"
+        )
+        submit_script = (
+            f"echo -e {_shell_quote(pip_job_script)} > {venv_path}/pip-install.sh && "
+            f"sbatch --parsable {venv_path}/pip-install.sh"
+        )
+        try:
+            result = subprocess.run(
+                ["ssh", "-o", "ConnectTimeout=10", ssh_target,
+                 f"bash -l -c {_shell_quote(submit_script)}"],
+                capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode != 0:
+                print(f"  Failed to submit pip install job: {result.stderr.strip()}", file=sys.stderr)
+                continue
+            job_id = result.stdout.strip().split(";")[0]
+            print(f"  Submitted Slurm job {job_id} — waiting for completion ...")
+        except Exception as e:
+            print(f"  Failed to submit pip install job: {e}", file=sys.stderr)
+            continue
+
+        # Step 3: poll until the Slurm job completes
+        import time
+        poll_cmd = f"squeue -j {job_id} -h -o %T 2>/dev/null || echo DONE"
+        while True:
+            time.sleep(10)
+            try:
+                result = subprocess.run(
+                    ["ssh", "-o", "ConnectTimeout=10", ssh_target, poll_cmd],
+                    capture_output=True, text=True, timeout=15,
+                )
+                state = result.stdout.strip()
+                if state in ("", "DONE", "COMPLETED", "FAILED", "CANCELLED", "TIMEOUT"):
+                    break
+                print(f"    job {job_id}: {state}")
+            except Exception:
+                break
+
+        # Step 4: check if the install succeeded
+        check_cmd = (
+            f"bash -l -c {_shell_quote(f'module load {python_module} && source {venv_path}/bin/activate && python -c \"import torch; print(torch.__version__, torch.version.cuda)\"')}"
+        )
+        try:
+            result = subprocess.run(
+                ["ssh", "-o", "ConnectTimeout=10", ssh_target, check_cmd],
+                capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode == 0:
+                torch_info = result.stdout.strip()
+                print(f"  venv ready    : {venv_path}")
+                print(f"  torch version : {torch_info}")
+            else:
+                print(f"  pip install may have failed. Check log: {_log}", file=sys.stderr)
+                print(f"  stderr: {result.stderr.strip()}", file=sys.stderr)
+        except Exception as e:
+            print(f"  Could not verify install: {e}", file=sys.stderr)
 
 
 def _shell_quote(s: str) -> str:
