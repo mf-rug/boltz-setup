@@ -498,7 +498,7 @@ def run_init() -> None:
             f"#SBATCH --output={_log}\\n"
             f"module load {python_module}\\n"
             f"source {venv_path}/bin/activate\\n"
-            f"pip install --upgrade {venv_pip}\\n"
+            f"pip install --ignore-installed {venv_pip}\\n"
         )
         submit_script = (
             f"echo -e {_shell_quote(pip_job_script)} > {venv_path}/pip-install.sh && "
