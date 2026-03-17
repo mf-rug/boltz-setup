@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from .generate import (
+    OMIT_ENTITY,
     ProteinEntity,
     DnaEntity,
     RnaEntity,
@@ -499,16 +500,48 @@ def _collect_rna(used_ids: set):
 # Entity registration and variant tracking
 # ---------------------------------------------------------------------------
 
+def _entity_value(entity):
+    """Extract the primary value (sequence/SMILES/CCD) from an entity."""
+    if isinstance(entity, ProteinEntity):
+        return entity.sequence
+    elif isinstance(entity, (DnaEntity, RnaEntity)):
+        return entity.sequence
+    elif isinstance(entity, LigandEntity):
+        return entity.smiles or entity.ccd
+    return None
+
+
 def _register_entity(state: WizardState, entity, values, names=None):
     """Add entity to state and record multi-values in variant_set if needed.
 
     *names* is an optional list of human-readable names (e.g. from FASTA
     headers) parallel to *values*.
+
+    When multiple variant values are provided, also asks whether to include
+    an apo variant (entity omitted).  The apo variant is appended to the
+    values list as the OMIT_ENTITY sentinel.
     """
     if entity is None:
         return
     state.entities.append(entity)
     idx = len(state.entities) - 1
+
+    # Offer apo (entity-omitted) variant for any entity
+    include_apo = styled_confirm(
+        "Also generate a variant without this entity (apo)", default=False
+    )
+    if include_apo:
+        if not values:
+            # Single-value entity: need to create a variant set with the
+            # original value so we can add the OMIT sentinel alongside it.
+            values = [_entity_value(entity)]
+        values = list(values) + [OMIT_ENTITY]
+        if names is not None:
+            names = list(names) + ["apo"]
+        else:
+            names = None
+        print_info(f"  → {len(values)} variants total (including apo)")
+
     if values:
         if state.variant_set is None:
             state.variant_set = VariantSet(variants={})

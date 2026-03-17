@@ -90,6 +90,10 @@ class SlurmParams:
     mem: str = "16GB"
 
 
+# Sentinel value used in VariantSet.variants to indicate "omit this entity"
+OMIT_ENTITY = "__OMIT__"
+
+
 @dataclass
 class VariantSet:
     """Describes entities with multiple values for screening."""
@@ -676,15 +680,24 @@ def build_yaml_variants(
     varied_set = set(indices)
 
     results: List[Tuple[str, str]] = []
+    n_skipped = 0
     for combo_indices in iterproduct(*index_ranges):
         ents = list(entities)
         tags: List[str] = []
+        omit_indices: set = set()
 
         for ent_idx, entity in enumerate(entities):
             if ent_idx in varied_set:
                 pos = idx_to_pos[ent_idx]
                 vi = combo_indices[pos]
                 val = value_lists[pos][vi]
+
+                # OMIT_ENTITY sentinel: skip this entity in this combination
+                if val == OMIT_ENTITY:
+                    omit_indices.add(ent_idx)
+                    tags.append("apo")
+                    continue
+
                 # Swap value in a shallow copy
                 varied = copy.copy(entity)
                 if isinstance(varied, (ProteinEntity, DnaEntity, RnaEntity)):
@@ -705,10 +718,27 @@ def build_yaml_variants(
             else:
                 tags.append(_entity_filename_tag(entity))
 
+        # Filter out omitted entities
+        if omit_indices:
+            ents = [e for i, e in enumerate(ents) if i not in omit_indices]
+
+        # Skip combinations that would produce an empty YAML
+        if not ents:
+            n_skipped += 1
+            continue
+
         desc = "_".join(tags)
         yaml_content = build_yaml(ents, constraints, properties, templates)
         filename = f"{job_name}_{desc}.yaml"
         results.append((filename, yaml_content))
+
+    if n_skipped:
+        import sys
+        print(
+            f"Warning: skipped {n_skipped} variant combination(s) "
+            "that would produce empty YAML (all entities omitted).",
+            file=sys.stderr,
+        )
 
     return results
 
@@ -782,6 +812,10 @@ def build_job_script(
         boltz_parts.append(f"    {f}")
     boltz_cmd = " \\\n".join(boltz_parts)
 
+    venv_block = ""
+    if venv:
+        venv_block = f"\n# Activate venv (Blackwell GPU support)\nsource {venv}/bin/activate\n"
+
     return f"""#!/bin/bash
 #SBATCH --job-name={slurm_params.job_name}
 #SBATCH --time={slurm_params.time}
@@ -828,11 +862,8 @@ echo "start $(date)"
 
 module purge
 module load {python_module}
-{f"""
-# Activate venv (Blackwell GPU support)
-source {venv}/bin/activate
-""" if venv else """
-"""}# GPU diagnostics
+{venv_block}
+# GPU diagnostics
 nvidia-smi
 
 # Memory optimization

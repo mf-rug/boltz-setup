@@ -47,11 +47,16 @@ def _resolve_ssh_user(target: str) -> Optional[str]:
 
 def _cluster_user() -> str:
     """Return the cluster username, derived from (in priority order):
+    0. on_cluster=true in config → $LOGNAME/$USER directly (no SSH detection)
     1. hpc / HPC env var (user@host or SSH alias)
     2. hpc-submit config (~/.config/hpc-submit/config.yaml → remote_host)
     3. rsyncer config (~/.config/rsyncer/config.json → server)
     4. $LOGNAME / $USER fallback
     """
+    # 0. Running on the cluster — $USER is the correct cluster username
+    if _cfg.get("on_cluster", False):
+        return os.environ.get("LOGNAME") or os.environ.get("USER", "user")
+
     # 1. Environment variable
     for var in ("hpc", "HPC"):
         val = os.environ.get(var, "").strip()
@@ -138,6 +143,10 @@ def _get_ssh_target() -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 _DEFAULTS: Dict[str, Any] = {
+    # Set to true when running directly on the cluster (skips SSH detection,
+    # loads python_module in wrapper scripts). False = local/laptop usage.
+    "on_cluster": False,
+
     # Full path to the boltz binary on the cluster (auto-detected by --init)
     # "boltz" works if it is on PATH after module load; set to absolute path if not.
     "boltz_bin": "boltz",
@@ -275,6 +284,7 @@ for _tier in GPU_TIERS:
         _tier["venv"] = _expand(_tier["venv"])
 PARTITIONS: List[Dict] = _cfg["partitions"]
 EPILOG_MARKER: str     = _cfg.get("epilog_marker", "")
+ON_CLUSTER: bool       = _cfg.get("on_cluster", False)
 
 
 # ---------------------------------------------------------------------------
@@ -537,9 +547,8 @@ def run_init() -> None:
                 break
 
         # Step 4: check if the install succeeded
-        check_cmd = (
-            f"bash -l -c {_shell_quote(f'module load {python_module} && source {venv_path}/bin/activate && python -c \"import torch; print(torch.__version__, torch.version.cuda)\"')}"
-        )
+        _torch_check = f"module load {python_module} && source {venv_path}/bin/activate && python -c 'import torch; print(torch.__version__, torch.version.cuda)'"
+        check_cmd = f"bash -l -c {_shell_quote(_torch_check)}"
         try:
             result = subprocess.run(
                 ["ssh", "-o", "ConnectTimeout=10", ssh_target, check_cmd],

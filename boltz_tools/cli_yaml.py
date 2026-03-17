@@ -17,6 +17,7 @@ from .generate import (
     BoltzParams,
     DnaEntity,
     LigandEntity,
+    OMIT_ENTITY,
     PocketConstraint,
     ProteinEntity,
     RnaEntity,
@@ -128,6 +129,12 @@ def _parse_entity_values(
         else:
             val, cc = _parse_copy_count(part)
             if not val:
+                continue
+            # NONE keyword → omit this entity in one variant
+            if val.upper() == "NONE":
+                all_values.append(OMIT_ENTITY)
+                all_names.append("apo")
+                copy_counts.append(cc)
                 continue
             cleaned, err = validator_fn(val)
             if err and not err.startswith("Warning:"):

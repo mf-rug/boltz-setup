@@ -2,4 +2,12 @@
 # Non-interactive YAML generation for Boltz predictions.
 # Resolve the directory this script lives in (works even via symlink in PATH)
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+
+# If running on the cluster, load the python module from config
+_cfg="$HOME/.config/boltz-setup/config.yaml"
+if [ -f "$_cfg" ] && grep -q "on_cluster: true" "$_cfg"; then
+    _mod=$(grep "python_module:" "$_cfg" | head -1 | sed 's/.*: *//')
+    [ -n "$_mod" ] && module load "$_mod" 2>/dev/null
+fi
+
 PYTHONPATH="$SCRIPT_DIR" exec python3 -c "from boltz_tools.cli_yaml import yaml_main; yaml_main()" "$@"

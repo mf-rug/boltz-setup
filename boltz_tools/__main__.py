@@ -60,19 +60,23 @@ elif len(sys.argv) > 1 and sys.argv[1] == "log":
     from .logparse import log_main
     log_main()
 else:
-    from .cluster import check_boltz_installation
-    installed, latest, needs_update = check_boltz_installation()
+    from .cluster import ON_CLUSTER
 
-    if installed is None:
-        print("\033[33m  Warning: boltz is not installed.\033[0m")
-        print("  Install with:  pip install --user boltz")
-        ans = input("  Continue anyway? [y/N] ").strip().lower()
-        if ans not in ("y", "yes"):
-            sys.exit(1)
-    elif needs_update:
-        print(f"\033[33m  Update available: boltz {installed} → {latest}\033[0m")
-        print("  Update with:  pip install --user --upgrade boltz")
-        print()
+    if ON_CLUSTER:
+        # Only check boltz installation when running directly on the cluster
+        from .cluster import check_boltz_installation
+        installed, latest, needs_update = check_boltz_installation()
+
+        if installed is None:
+            print("\033[33m  Warning: boltz is not installed.\033[0m")
+            print("  Install with:  pip install --user boltz")
+            ans = input("  Continue anyway? [y/N] ").strip().lower()
+            if ans not in ("y", "yes"):
+                sys.exit(1)
+        elif needs_update:
+            print(f"\033[33m  Update available: boltz {installed} → {latest}\033[0m")
+            print("  Update with:  pip install --user --upgrade boltz")
+            print()
 
     from .cli import main
     main()
