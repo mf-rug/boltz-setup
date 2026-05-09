@@ -832,6 +832,31 @@ _job_dir="${{SLURM_SUBMIT_DIR:-$(cd "$(dirname "$(readlink -f "$0")")" && pwd)}}
 
 scontrol show job $SLURM_JOB_ID
 
+# Twin claim: when .siblings exists, the first sibling to start wins.
+# (1) Pre-check: if any sibling is already RUNNING, exit immediately.
+# (2) Atomic claim: noclobber-write our job ID to .winner.
+# (3) Cancel siblings if we won; exit if we lost.
+if [ -f "$_job_dir/.siblings" ]; then
+    for _sib in $(cat "$_job_dir/.siblings"); do
+        [ "$_sib" = "$SLURM_JOB_ID" ] && continue
+        _state=$(squeue -j "$_sib" -h -o %T 2>/dev/null)
+        if [ "$_state" = "RUNNING" ]; then
+            echo "Twin sibling $_sib already RUNNING. Exiting."
+            exit 0
+        fi
+    done
+    if ( set -o noclobber; echo "$SLURM_JOB_ID" > "$_job_dir/.winner" ) 2>/dev/null; then
+        echo "Twin claim won by $SLURM_JOB_ID — cancelling siblings."
+        for _sib in $(cat "$_job_dir/.siblings"); do
+            [ "$_sib" = "$SLURM_JOB_ID" ] && continue
+            scancel "$_sib" 2>/dev/null || true
+        done
+    else
+        echo "Twin sibling already claimed ($(cat "$_job_dir/.winner")). Exiting."
+        exit 0
+    fi
+fi
+
 # Rename script to include job ID (job.sh -> job_12345.sh)
 _self="$(readlink -f "$0")"
 _stem="${{_self%.sh}}"

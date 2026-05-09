@@ -339,6 +339,12 @@ examples:
                         help="Memory, e.g. 32GB (default: auto-recommended).")
     sl_grp.add_argument("--cpus", type=int, default=7, metavar="N",
                         help="CPUs per task (default: 7).")
+    sl_grp.add_argument("--any-gpu", action="store_true",
+                        help="Generate twin job scripts: one for the recommended "
+                             "non-RTX GPU and one for RTX Pro 6000. hpc-submit "
+                             "will submit both; the first to start cancels the other. "
+                             "Mutually exclusive with --gpu. Skipped silently if the "
+                             "recommended tier is RTX-only.")
 
     # --- Output flags ---
     out_grp = parser.add_argument_group("output flags")
@@ -548,10 +554,14 @@ examples:
     gpu_sbatch = args.gpu or gpu_rec["gpu_sbatch"]
     mem = args.mem or gpu_rec["mem"]
 
+    # Validate flag combinations
+    if args.any_gpu and args.gpu:
+        parser.error("--any-gpu and --gpu are mutually exclusive.")
+
     # Resolve venv: when --gpu overrides the recommendation, look up the
     # matching tier's venv instead of using the auto-recommended one.
+    from .cluster import GPU_TIERS
     if args.gpu:
-        from .cluster import GPU_TIERS
         venv = None
         for t in GPU_TIERS:
             if t["gpu_sbatch"] == args.gpu:
@@ -560,31 +570,85 @@ examples:
     else:
         venv = gpu_rec.get("venv")
 
-    slurm_params = SlurmParams(
-        job_name=args.name,
-        time=time_str,
-        partition=partition,
-        gpus_per_node=gpu_sbatch,
-        nodes=1,
-        cpus_per_task=args.cpus,
-        mem=mem,
-    )
+    # --any-gpu twin generation: if the recommended tier is NOT the RTX-only
+    # top tier, generate two scripts (std + rtx) so Slurm picks the first
+    # available GPU. Each script's twin-claim block (active when .siblings
+    # exists at runtime) cancels its sibling on start.
+    rtx_tier = next((t for t in GPU_TIERS if t.get("venv")), None)
+    twin_mode = bool(args.any_gpu and rtx_tier and gpu_sbatch != rtx_tier["gpu_sbatch"])
 
-    # -----------------------------------------------------------------------
-    # 10. Write job.sh
-    # -----------------------------------------------------------------------
-    job_script = build_job_script(
-        job_dir=str(out_dir),
-        cache_dir=BOLTZ_CACHE_DIR,
-        boltz_params=bp,
-        slurm_params=slurm_params,
-        python_module=PYTHON_MODULE,
-        boltz_bin=BOLTZ_BIN,
-        venv=venv,
-    )
-    job_sh = out_dir / "job.sh"
-    job_sh.write_text(job_script)
-    job_sh.chmod(0o755)
+    if twin_mode:
+        # Std twin: for tier 1 (V100 fits), use unspecified GPU type so Slurm
+        # picks the first non-RTX available (Hábrók's default). For higher
+        # tiers, keep the recommended type since smaller GPUs won't fit.
+        std_gpu = "1" if gpu_sbatch.startswith("v100") else gpu_sbatch
+        slurm_params_std = SlurmParams(
+            job_name=args.name,
+            time=time_str,
+            partition=partition,
+            gpus_per_node=std_gpu,
+            nodes=1,
+            cpus_per_task=args.cpus,
+            mem=mem,
+        )
+        slurm_params_rtx = SlurmParams(
+            job_name=args.name,
+            time=time_str,
+            partition=partition,
+            gpus_per_node=rtx_tier["gpu_sbatch"],
+            nodes=1,
+            cpus_per_task=args.cpus,
+            mem=mem,
+        )
+        # RTX twin doesn't need --no_kernels (RTX has modern compute capability)
+        import copy as _copy
+        bp_rtx = _copy.copy(bp)
+        bp_rtx.no_kernels = False
+
+        job_script_std = build_job_script(
+            job_dir=str(out_dir),
+            cache_dir=BOLTZ_CACHE_DIR,
+            boltz_params=bp,
+            slurm_params=slurm_params_std,
+            python_module=PYTHON_MODULE,
+            boltz_bin=BOLTZ_BIN,
+            venv=None,
+        )
+        job_script_rtx = build_job_script(
+            job_dir=str(out_dir),
+            cache_dir=BOLTZ_CACHE_DIR,
+            boltz_params=bp_rtx,
+            slurm_params=slurm_params_rtx,
+            python_module=PYTHON_MODULE,
+            boltz_bin=BOLTZ_BIN,
+            venv=rtx_tier.get("venv"),
+        )
+        (out_dir / "job.sh").write_text(job_script_std)
+        (out_dir / "job.sh").chmod(0o755)
+        (out_dir / "job_rtx.sh").write_text(job_script_rtx)
+        (out_dir / "job_rtx.sh").chmod(0o755)
+        (out_dir / "siblings.txt").write_text("job.sh\njob_rtx.sh\n")
+    else:
+        slurm_params = SlurmParams(
+            job_name=args.name,
+            time=time_str,
+            partition=partition,
+            gpus_per_node=gpu_sbatch,
+            nodes=1,
+            cpus_per_task=args.cpus,
+            mem=mem,
+        )
+        job_script = build_job_script(
+            job_dir=str(out_dir),
+            cache_dir=BOLTZ_CACHE_DIR,
+            boltz_params=bp,
+            slurm_params=slurm_params,
+            python_module=PYTHON_MODULE,
+            boltz_bin=BOLTZ_BIN,
+            venv=venv,
+        )
+        (out_dir / "job.sh").write_text(job_script)
+        (out_dir / "job.sh").chmod(0o755)
 
     # -----------------------------------------------------------------------
     # 11. Copy boltz_tools package into out-dir so the cluster can import it
@@ -604,14 +668,29 @@ examples:
         print(f"Warning: {w}", file=sys.stderr)
 
     print(f"Wrote {n_yamls} YAML(s) to {input_dir}/")
-    print(f"Wrote job.sh to {out_dir}/")
+    if twin_mode:
+        print(f"Wrote job.sh + job_rtx.sh to {out_dir}/ (twin mode)")
+        print(f"Wrote siblings.txt to {out_dir}/")
+    else:
+        print(f"Wrote job.sh to {out_dir}/")
     print(f"Copied boltz_tools/ to {out_dir}/")
-    print(
-        f"  Slurm: partition={partition}  time={time_str}  "
-        f"gpu={gpu_sbatch}  mem={mem}"
-    )
+    if twin_mode:
+        std_gpu_disp = "1 (any non-RTX)" if std_gpu == "1" else std_gpu
+        print(
+            f"  Std twin:  partition={partition}  time={time_str}  "
+            f"gpu={std_gpu_disp}  mem={mem}"
+        )
+        print(
+            f"  RTX twin:  partition={partition}  time={time_str}  "
+            f"gpu={rtx_tier['gpu_sbatch']}  mem={mem}  venv={rtx_tier.get('venv')}"
+        )
+    else:
+        print(
+            f"  Slurm: partition={partition}  time={time_str}  "
+            f"gpu={gpu_sbatch}  mem={mem}"
+        )
     print(f"  Cache: {BOLTZ_CACHE_DIR}")
-    if venv:
+    if venv and not twin_mode:
         print(f"  Venv:  {venv}")
     if BOLTZ_BIN != "boltz":
         print(f"  Boltz: {BOLTZ_BIN}")
