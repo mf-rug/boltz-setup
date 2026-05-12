@@ -147,10 +147,6 @@ _DEFAULTS: Dict[str, Any] = {
     # loads python_module in wrapper scripts). False = local/laptop usage.
     "on_cluster": False,
 
-    # Full path to the boltz binary on the cluster (auto-detected by --init)
-    # "boltz" works if it is on PATH after module load; set to absolute path if not.
-    "boltz_bin": "boltz",
-
     # 'module load <python_module>' in every job script
     "python_module": "Python/3.11.5-GCCcore-13.2.0",
 
@@ -162,6 +158,20 @@ _DEFAULTS: Dict[str, Any] = {
 
     # Default parent directory for all job subdirectories
     "jobs_dir": "/scratch/{user}/boltz_jobs",
+
+    # Unified per-user venv. One venv covers every GPU on Hábrók:
+    # torch 2.10.0+cu128 ships sm_70/75/80/86/90/100/120 — V100/A100/L40s/RTX
+    # all runtime-verified. Newer wheels (2.11+) drop sm_70 and break V100.
+    # `pip_install` lines run in order during --init. Each line is appended
+    # after `pip install` (so prefix `--force-reinstall` etc. inline).
+    "venv": {
+        "path": "/scratch/{user}/venvs/boltz",
+        "pip_install": [
+            "'torch==2.10.0' --index-url https://download.pytorch.org/whl/cu128",
+            "'boltz[cuda]' -U",
+            "--force-reinstall 'torch==2.10.0' --index-url https://download.pytorch.org/whl/cu128",
+        ],
+    },
 
     # GPU recommendation tiers: first entry where actual_tokens <= max_tokens wins.
     # gpu_sbatch: value passed to #SBATCH --gpus-per-node
@@ -175,9 +185,7 @@ _DEFAULTS: Dict[str, Any] = {
         {"max_tokens": 2500,    "gpu_sbatch": "a100:1", "mem": "32GB",
          "extra_flags": []},
         {"max_tokens": 9_999_999, "gpu_sbatch": "rtx_pro_6000:1", "mem": "64GB",
-         "extra_flags": [], "warn": True,
-         "venv": "/scratch/{user}/venvs/boltz-blackwell",
-         "venv_pip": "torch --index-url https://download.pytorch.org/whl/cu128"},
+         "extra_flags": [], "warn": True},
     ],
 
     # Slurm partitions: listed in priority order (shortest first).
@@ -198,38 +206,20 @@ _DEFAULTS: Dict[str, Any] = {
 # Config loading
 # ---------------------------------------------------------------------------
 
-def _merge_gpu_tiers(user_tiers: List[Dict], default_tiers: List[Dict]) -> List[Dict]:
-    """Merge default GPU tier fields into user-provided tiers.
-
-    Matches tiers by gpu_sbatch value. Default fields (like venv, venv_pip)
-    are added to user tiers that don't explicitly set them.
-    """
-    defaults_by_gpu = {t["gpu_sbatch"]: t for t in default_tiers}
-    merged = []
-    for tier in user_tiers:
-        gpu = tier.get("gpu_sbatch")
-        if gpu and gpu in defaults_by_gpu:
-            # Start with defaults, overlay user values
-            m = dict(defaults_by_gpu[gpu])
-            m.update(tier)
-            merged.append(m)
-        else:
-            merged.append(tier)
-    return merged
-
-
 def _load_config() -> Dict[str, Any]:
     """Load ~/.config/boltz-setup/config.yaml, writing defaults if absent."""
     if CONFIG_PATH.exists():
         try:
             import yaml
             raw = yaml.safe_load(CONFIG_PATH.read_text()) or {}
-            # Deep-merge: top-level keys from file override defaults
             merged = dict(_DEFAULTS)
             merged.update(raw)
-            # Deep-merge gpu_tiers so default fields (venv, venv_pip) persist
-            if "gpu_tiers" in raw:
-                merged["gpu_tiers"] = _merge_gpu_tiers(raw["gpu_tiers"], _DEFAULTS["gpu_tiers"])
+            # Merge nested `venv` block so users who only set `venv.path` still
+            # get the default pip_install list (and vice versa).
+            if "venv" in raw and isinstance(raw["venv"], dict):
+                v = dict(_DEFAULTS["venv"])
+                v.update(raw["venv"])
+                merged["venv"] = v
             return merged
         except Exception:
             pass
@@ -274,14 +264,13 @@ def _expand(s: str) -> str:
     return s.replace("{user}", _user)
 
 PYTHON_MODULE: str     = _cfg["python_module"]
-BOLTZ_BIN: str         = _cfg.get("boltz_bin", "boltz")
 SCRATCH: str           = _expand(_cfg["scratch_dir"])
 BOLTZ_CACHE_DIR: str   = _expand(_cfg["cache_dir"])
 BOLTZ_JOBS_DIR: str    = _expand(_cfg["jobs_dir"])
 GPU_TIERS: List[Dict]  = _cfg["gpu_tiers"]
-for _tier in GPU_TIERS:
-    if "venv" in _tier and _tier["venv"]:
-        _tier["venv"] = _expand(_tier["venv"])
+_venv_cfg              = _cfg.get("venv") or {}
+VENV_PATH: str         = _expand(_venv_cfg.get("path", "")) if _venv_cfg.get("path") else ""
+VENV_PIP_INSTALL: List[str] = list(_venv_cfg.get("pip_install", []))
 PARTITIONS: List[Dict] = _cfg["partitions"]
 EPILOG_MARKER: str     = _cfg.get("epilog_marker", "")
 ON_CLUSTER: bool       = _cfg.get("on_cluster", False)
@@ -296,35 +285,29 @@ _STORAGE_VARS = ("SCRATCH", "WORK", "DATA", "PROJECT", "LUSTRE", "TMPDIR")
 
 
 def remote_detect(ssh_target: str) -> Dict[str, Any]:
-    """SSH to the cluster and detect the boltz binary and model cache.
+    """SSH to the cluster and detect the model cache and storage env vars.
 
-    Runs a login shell (bash -l) so that module-system env vars and
-    sysadmin-set storage vars ($SCRATCH, $WORK, …) are visible.
-    Relies on an active SSH ControlMaster or key-based auth to avoid
-    interactive prompts.
+    Runs a login shell (bash -l) so module-system env vars and sysadmin-set
+    storage vars ($SCRATCH, $WORK, …) are visible. Relies on an active SSH
+    ControlMaster or key-based auth to avoid interactive prompts.
 
     Returns a dict with:
-        boltz_bin:  str | None  — absolute path to the boltz binary
         cache_dir:  str | None  — path to the model cache (contains boltz2_conf.ckpt)
         storage:    dict        — storage env vars found on the remote
         error:      str | None  — error message if SSH failed
     """
-    # One-shot script: print env, find boltz, search for cache under storage vars
+    # One-shot script: print env, search for cache under storage vars
     script = textwrap.dedent("""\
         env
-        _b=$(which boltz 2>/dev/null || find "$HOME/.local/bin" -name boltz -maxdepth 1 2>/dev/null | head -1)
-        echo "BOLTZ_SETUP_BIN=${_b}"
-        if [ -n "$_b" ]; then
-            for _dir in "$SCRATCH" "$WORK" "$DATA" "$PROJECT" "$LUSTRE" "/scratch/$USER" "$HOME"; do
-                [ -z "$_dir" ] && continue
-                for _sfx in "/boltz" "/.boltz" ""; do
-                    _p="${_dir}${_sfx}"
-                    [ -f "${_p}/boltz2_conf.ckpt" ] || continue
-                    echo "BOLTZ_SETUP_CACHE=${_p}"
-                    break 2
-                done
+        for _dir in "$SCRATCH" "$WORK" "$DATA" "$PROJECT" "$LUSTRE" "/scratch/$USER" "$HOME"; do
+            [ -z "$_dir" ] && continue
+            for _sfx in "/boltz" "/.boltz" ""; do
+                _p="${_dir}${_sfx}"
+                [ -f "${_p}/boltz2_conf.ckpt" ] || continue
+                echo "BOLTZ_SETUP_CACHE=${_p}"
+                break 2
             done
-        fi
+        done
     """)
     # Encode the script as base64 and pass it in the command, not via stdin.
     # Passing via stdin interferes with SSH auth: if the ControlMaster socket
@@ -338,7 +321,7 @@ def remote_detect(ssh_target: str) -> Dict[str, Any]:
             capture_output=True, text=True, timeout=30,
         )
     except Exception as e:
-        return {"boltz_bin": None, "cache_dir": None, "storage": {}, "error": str(e)}
+        return {"cache_dir": None, "storage": {}, "error": str(e)}
 
     if result.returncode != 0:
         msg = result.stderr.strip() or f"exit code {result.returncode}"
@@ -355,9 +338,8 @@ def remote_detect(ssh_target: str) -> Dict[str, Any]:
             diag = ""
         if diag:
             msg = f"{msg}\n\nSSH diagnostics (-v):\n{diag}"
-        return {"boltz_bin": None, "cache_dir": None, "storage": {}, "error": msg}
+        return {"cache_dir": None, "storage": {}, "error": msg}
 
-    boltz_bin = None
     cache_dir = None
     storage: Dict[str, str] = {}
 
@@ -365,14 +347,12 @@ def remote_detect(ssh_target: str) -> Dict[str, Any]:
         key, sep, val = line.partition("=")
         if not sep:
             continue
-        if key == "BOLTZ_SETUP_BIN":
-            boltz_bin = val.strip() or None
-        elif key == "BOLTZ_SETUP_CACHE":
+        if key == "BOLTZ_SETUP_CACHE":
             cache_dir = val.strip() or None
         elif key in _STORAGE_VARS:
             storage[key] = val
 
-    return {"boltz_bin": boltz_bin, "cache_dir": cache_dir, "storage": storage, "error": None}
+    return {"cache_dir": cache_dir, "storage": storage, "error": None}
 
 
 def run_init() -> None:
@@ -402,22 +382,12 @@ def run_init() -> None:
         )
         return
 
-    # --- Boltz binary ---
-    boltz_bin = detected["boltz_bin"]
-    if boltz_bin:
-        print(f"  boltz binary : {boltz_bin}")
-    else:
-        print("  boltz binary : NOT FOUND", file=sys.stderr)
-        print("  → Install on the cluster with: pip install --user boltz", file=sys.stderr)
-        boltz_bin = "boltz"  # keep default; job will fail with clear error at runtime
-
     # --- Cache directory ---
     cache_dir = detected["cache_dir"]
     if cache_dir:
         print(f"  model cache  : {cache_dir}")
     else:
-        if boltz_bin != "boltz":
-            print("  model cache  : not found (models not yet downloaded)")
+        print("  model cache  : not found (models will download on first run)")
         # Build a suggestion from the first available storage var
         storage = detected["storage"]
         suggestion = None
@@ -433,8 +403,9 @@ def run_init() -> None:
 
     # Load existing config (preserve gpu_tiers, partitions, etc.) and update
     cfg = _load_config()
-    cfg["boltz_bin"] = boltz_bin
     cfg["cache_dir"] = cache_dir  # absolute path — no {user} substitution needed
+    # Drop the obsolete boltz_bin field if an old config still has it
+    cfg.pop("boltz_bin", None)
 
     try:
         _write_config(cfg)
@@ -442,127 +413,154 @@ def run_init() -> None:
     except Exception as e:
         print(f"Failed to write config: {e}", file=sys.stderr)
 
-    # --- Venv creation for GPU tiers that require one ---
-    seen_venvs: set = set()
-    for tier in cfg.get("gpu_tiers", []):
-        venv_raw = tier.get("venv")
-        venv_pip = tier.get("venv_pip")
-        if not venv_raw or not venv_pip:
-            continue
-        venv_path = venv_raw.replace("{user}", _user)
-        if venv_path in seen_venvs:
-            continue
-        seen_venvs.add(venv_path)
+    # --- Universal venv (one wheel covers V100/A100/L40s/RTX Pro 6000) ---
+    venv_cfg = cfg.get("venv") or {}
+    venv_path_raw = venv_cfg.get("path", "")
+    pip_install = list(venv_cfg.get("pip_install") or [])
+    if not venv_path_raw or not pip_install:
+        print(
+            "\nNo `venv` block in config — skipping venv setup. "
+            "Add a venv.path + venv.pip_install to enable.",
+            file=sys.stderr,
+        )
+        return
+    venv_path = venv_path_raw.replace("{user}", _user)
+    python_module = cfg.get("python_module", _DEFAULTS["python_module"])
 
-        # Check if venv already exists on the cluster
-        print(f"\nChecking venv: {venv_path} ...")
-        check_cmd = f"test -f {venv_path}/bin/activate && echo EXISTS || echo MISSING"
+    print(f"\nChecking venv: {venv_path} ...")
+    check_cmd = f"test -f {venv_path}/bin/activate && echo EXISTS || echo MISSING"
+    try:
+        result = subprocess.run(
+            ["ssh", "-o", "ConnectTimeout=10", ssh_target, check_cmd],
+            capture_output=True, text=True, timeout=15,
+        )
+        exists = "EXISTS" in result.stdout
+    except Exception:
+        print("  Could not check venv (SSH error). Skipping.", file=sys.stderr)
+        return
+
+    if exists:
+        print(f"  venv exists   : {venv_path}")
+        print("  (re-run after `ssh hpc 'rm -rf {0}'` to rebuild)".format(venv_path))
+        return
+
+    # Heads-up about the legacy per-GPU venv from older toolchain versions
+    legacy_venv = f"/scratch/{_user}/venvs/boltz-blackwell"
+    try:
+        legacy_check = subprocess.run(
+            ["ssh", "-o", "ConnectTimeout=10", ssh_target,
+             f"test -d {legacy_venv} && echo LEGACY || echo NONE"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if "LEGACY" in legacy_check.stdout:
+            print(
+                f"  Note: legacy venv detected at {legacy_venv} (no longer used).\n"
+                f"  Once you confirm the new venv works, you can free disk with:\n"
+                f"    ssh {ssh_target} 'rm -rf {legacy_venv}'"
+            )
+    except Exception:
+        pass
+
+    # Step 1: create the venv on the login node (lightweight)
+    print("\n  Creating venv (login node) ...")
+    venv_create_script = (
+        f"set -e && "
+        f"module load {python_module} && "
+        f"python -m venv {venv_path}"
+    )
+    try:
+        result = subprocess.run(
+            ["ssh", "-o", "ConnectTimeout=10", ssh_target,
+             f"bash -l -c {_shell_quote(venv_create_script)}"],
+            capture_output=True, text=True, timeout=300,
+        )
+        if result.returncode != 0:
+            print(f"  venv creation failed: {result.stderr.strip()}", file=sys.stderr)
+            return
+    except Exception as e:
+        print(f"  venv creation failed: {e}", file=sys.stderr)
+        return
+
+    # Step 2: pip install via a Slurm job (login node kills large installs).
+    # All steps run in one job; any failure aborts (`set -e`).
+    print("  Installing torch + boltz via Slurm job (~3-5 GB total) ...")
+    _log = f"{venv_path}/pip-install.log"
+    install_lines = "\\n".join(f"pip install {spec}" for spec in pip_install)
+    pip_job_script = (
+        f"#!/bin/bash\\n"
+        f"#SBATCH --job-name=venv-setup\\n"
+        f"#SBATCH --partition=regular\\n"
+        f"#SBATCH --time=00:30:00\\n"
+        f"#SBATCH --cpus-per-task=2\\n"
+        f"#SBATCH --mem=8GB\\n"
+        f"#SBATCH --output={_log}\\n"
+        f"set -e\\n"
+        f"module load {python_module}\\n"
+        f"source {venv_path}/bin/activate\\n"
+        f"pip install --upgrade pip\\n"
+        f"{install_lines}\\n"
+    )
+    submit_script = (
+        f"echo -e {_shell_quote(pip_job_script)} > {venv_path}/pip-install.sh && "
+        f"sbatch --parsable {venv_path}/pip-install.sh"
+    )
+    try:
+        result = subprocess.run(
+            ["ssh", "-o", "ConnectTimeout=10", ssh_target,
+             f"bash -l -c {_shell_quote(submit_script)}"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            print(f"  Failed to submit pip install job: {result.stderr.strip()}", file=sys.stderr)
+            return
+        job_id = result.stdout.strip().split(";")[0]
+        print(f"  Submitted Slurm job {job_id} — waiting for completion ...")
+    except Exception as e:
+        print(f"  Failed to submit pip install job: {e}", file=sys.stderr)
+        return
+
+    # Step 3: poll until the Slurm job completes
+    import time
+    poll_cmd = f"squeue -j {job_id} -h -o %T 2>/dev/null || echo DONE"
+    while True:
+        time.sleep(10)
         try:
             result = subprocess.run(
-                ["ssh", "-o", "ConnectTimeout=10", ssh_target, check_cmd],
+                ["ssh", "-o", "ConnectTimeout=10", ssh_target, poll_cmd],
                 capture_output=True, text=True, timeout=15,
             )
-            exists = "EXISTS" in result.stdout
-        except Exception:
-            print(f"  Could not check venv (SSH error). Skipping.", file=sys.stderr)
-            continue
-
-        if exists:
-            print(f"  venv exists   : {venv_path}")
-            continue
-
-        # Create the venv (venv itself on login node, pip install via Slurm)
-        gpu_name = tier.get("gpu_sbatch", "GPU").split(":")[0]
-        python_module = cfg.get("python_module", _DEFAULTS["python_module"])
-
-        # Step 1: create the venv on the login node (lightweight)
-        print(f"\n  Creating venv for {gpu_name} support ...")
-        venv_create_script = (
-            f"set -e && "
-            f"module load {python_module} && "
-            f"python -m venv --system-site-packages {venv_path}"
-        )
-        try:
-            result = subprocess.run(
-                ["ssh", "-o", "ConnectTimeout=10", ssh_target,
-                 f"bash -l -c {_shell_quote(venv_create_script)}"],
-                capture_output=True, text=True, timeout=300,
-            )
-            if result.returncode != 0:
-                print(f"  venv creation failed: {result.stderr.strip()}", file=sys.stderr)
-                continue
-        except Exception as e:
-            print(f"  venv creation failed: {e}", file=sys.stderr)
-            continue
-
-        # Step 2: pip install via a Slurm job (login node kills large installs)
-        print(f"  Installing PyTorch via Slurm job (~2-3 GB download) ...")
-        _log = f"{venv_path}/pip-install.log"
-        pip_job_script = (
-            f"#!/bin/bash\\n"
-            f"#SBATCH --job-name=venv-setup\\n"
-            f"#SBATCH --partition=regular\\n"
-            f"#SBATCH --time=00:15:00\\n"
-            f"#SBATCH --cpus-per-task=2\\n"
-            f"#SBATCH --mem=8GB\\n"
-            f"#SBATCH --output={_log}\\n"
-            f"module load {python_module}\\n"
-            f"source {venv_path}/bin/activate\\n"
-            f"pip install --ignore-installed {venv_pip}\\n"
-        )
-        submit_script = (
-            f"echo -e {_shell_quote(pip_job_script)} > {venv_path}/pip-install.sh && "
-            f"sbatch --parsable {venv_path}/pip-install.sh"
-        )
-        try:
-            result = subprocess.run(
-                ["ssh", "-o", "ConnectTimeout=10", ssh_target,
-                 f"bash -l -c {_shell_quote(submit_script)}"],
-                capture_output=True, text=True, timeout=30,
-            )
-            if result.returncode != 0:
-                print(f"  Failed to submit pip install job: {result.stderr.strip()}", file=sys.stderr)
-                continue
-            job_id = result.stdout.strip().split(";")[0]
-            print(f"  Submitted Slurm job {job_id} — waiting for completion ...")
-        except Exception as e:
-            print(f"  Failed to submit pip install job: {e}", file=sys.stderr)
-            continue
-
-        # Step 3: poll until the Slurm job completes
-        import time
-        poll_cmd = f"squeue -j {job_id} -h -o %T 2>/dev/null || echo DONE"
-        while True:
-            time.sleep(10)
-            try:
-                result = subprocess.run(
-                    ["ssh", "-o", "ConnectTimeout=10", ssh_target, poll_cmd],
-                    capture_output=True, text=True, timeout=15,
-                )
-                state = result.stdout.strip()
-                if state in ("", "DONE", "COMPLETED", "FAILED", "CANCELLED", "TIMEOUT"):
-                    break
-                print(f"    job {job_id}: {state}")
-            except Exception:
+            state = result.stdout.strip()
+            if state in ("", "DONE", "COMPLETED", "FAILED", "CANCELLED", "TIMEOUT"):
                 break
+            print(f"    job {job_id}: {state}")
+        except Exception:
+            break
 
-        # Step 4: check if the install succeeded
-        _torch_check = f"module load {python_module} && source {venv_path}/bin/activate && python -c 'import torch; print(torch.__version__, torch.version.cuda)'"
-        check_cmd = f"bash -l -c {_shell_quote(_torch_check)}"
-        try:
-            result = subprocess.run(
-                ["ssh", "-o", "ConnectTimeout=10", ssh_target, check_cmd],
-                capture_output=True, text=True, timeout=30,
-            )
-            if result.returncode == 0:
-                torch_info = result.stdout.strip()
-                print(f"  venv ready    : {venv_path}")
-                print(f"  torch version : {torch_info}")
-            else:
-                print(f"  pip install may have failed. Check log: {_log}", file=sys.stderr)
-                print(f"  stderr: {result.stderr.strip()}", file=sys.stderr)
-        except Exception as e:
-            print(f"  Could not verify install: {e}", file=sys.stderr)
+    # Step 4: verify torch + boltz both import and arch_flags includes sm_70
+    _verify = (
+        f"module load {python_module} && "
+        f"source {venv_path}/bin/activate && "
+        f"python -c 'import torch, boltz; "
+        f"flags = torch._C._cuda_getArchFlags() if hasattr(torch._C, \"_cuda_getArchFlags\") else \"\"; "
+        f"print(\"torch\", torch.__version__); "
+        f"print(\"boltz\", boltz.__version__); "
+        f"print(\"sm_70_in_flags\", \"sm_70\" in flags)'"
+    )
+    try:
+        result = subprocess.run(
+            ["ssh", "-o", "ConnectTimeout=10", ssh_target,
+             f"bash -l -c {_shell_quote(_verify)}"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            print("  venv ready    :", venv_path)
+            for line in result.stdout.strip().splitlines():
+                print(f"    {line}")
+        else:
+            print(f"  Install may have failed. Check log: {_log}", file=sys.stderr)
+            print(f"  stderr: {result.stderr.strip()}", file=sys.stderr)
+    except Exception as e:
+        print(f"  Could not verify install: {e}", file=sys.stderr)
 
 
 def _shell_quote(s: str) -> str:

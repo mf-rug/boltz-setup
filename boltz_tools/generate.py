@@ -405,7 +405,6 @@ def recommend_gpu(total_tokens: int) -> Dict:
         "gpu_sbatch": tier["gpu_sbatch"],
         "mem": tier["mem"],
         "boltz_extra_flags": tier.get("extra_flags", []),
-        "venv": tier.get("venv"),
         "warnings": warnings,
     }
 
@@ -783,24 +782,25 @@ def build_job_script(
     boltz_params: BoltzParams,
     slurm_params: SlurmParams,
     python_module: Optional[str] = None,
-    boltz_bin: Optional[str] = None,
     venv: Optional[str] = None,
 ) -> str:
     """Build a Slurm job script for boltz predict."""
     if python_module is None:
         from .cluster import PYTHON_MODULE
         python_module = PYTHON_MODULE
-    if boltz_bin is None:
-        from .cluster import BOLTZ_BIN
-        boltz_bin = BOLTZ_BIN
+    if venv is None:
+        from .cluster import VENV_PATH
+        venv = VENV_PATH
+    if not venv:
+        raise RuntimeError(
+            "No venv configured. Run `boltz-setup-yaml --init` to create the "
+            "per-user venv, or set venv.path in ~/.config/boltz-setup/config.yaml."
+        )
     flag_list = _boltz_flags(boltz_params)
 
-    # When a venv is active, use python -c to bypass the hardcoded shebang
-    # in the boltz script, ensuring the venv's Python (correct PyTorch) is used.
-    if venv:
-        boltz_invoke = 'python -c "from boltz.main import cli; cli()"'
-    else:
-        boltz_invoke = boltz_bin
+    # Always invoke via the venv's python — `python -c` bypasses the boltz
+    # binary's hardcoded shebang so we get the venv's PyTorch.
+    boltz_invoke = 'python -c "from boltz.main import cli; cli()"'
 
     # Build multi-line boltz command for readability
     boltz_parts = [
@@ -811,10 +811,6 @@ def build_job_script(
     for f in flag_list:
         boltz_parts.append(f"    {f}")
     boltz_cmd = " \\\n".join(boltz_parts)
-
-    venv_block = ""
-    if venv:
-        venv_block = f"\n# Activate venv (Blackwell GPU support)\nsource {venv}/bin/activate\n"
 
     return f"""#!/bin/bash
 #SBATCH --job-name={slurm_params.job_name}
@@ -831,31 +827,6 @@ def build_job_script(
 _job_dir="${{SLURM_SUBMIT_DIR:-$(cd "$(dirname "$(readlink -f "$0")")" && pwd)}}"
 
 scontrol show job $SLURM_JOB_ID
-
-# Twin claim: when .siblings exists, the first sibling to start wins.
-# (1) Pre-check: if any sibling is already RUNNING, exit immediately.
-# (2) Atomic claim: noclobber-write our job ID to .winner.
-# (3) Cancel siblings if we won; exit if we lost.
-if [ -f "$_job_dir/.siblings" ]; then
-    for _sib in $(cat "$_job_dir/.siblings"); do
-        [ "$_sib" = "$SLURM_JOB_ID" ] && continue
-        _state=$(squeue -j "$_sib" -h -o %T 2>/dev/null)
-        if [ "$_state" = "RUNNING" ]; then
-            echo "Twin sibling $_sib already RUNNING. Exiting."
-            exit 0
-        fi
-    done
-    if ( set -o noclobber; echo "$SLURM_JOB_ID" > "$_job_dir/.winner" ) 2>/dev/null; then
-        echo "Twin claim won by $SLURM_JOB_ID — cancelling siblings."
-        for _sib in $(cat "$_job_dir/.siblings"); do
-            [ "$_sib" = "$SLURM_JOB_ID" ] && continue
-            scancel "$_sib" 2>/dev/null || true
-        done
-    else
-        echo "Twin sibling already claimed ($(cat "$_job_dir/.winner")). Exiting."
-        exit 0
-    fi
-fi
 
 # Rename script to include job ID (job.sh -> job_12345.sh)
 _self="$(readlink -f "$0")"
@@ -887,7 +858,10 @@ echo "start $(date)"
 
 module purge
 module load {python_module}
-{venv_block}
+
+# Activate the per-user venv (one wheel covers all Hábrók GPUs).
+source {venv}/bin/activate
+
 # GPU diagnostics
 nvidia-smi
 
