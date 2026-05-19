@@ -189,7 +189,7 @@ Written into `job.sh`, not the YAML.
 | `--recycling-steps N` | `10` | Structure recycling iterations |
 | `--diffusion-samples N` | `10` | Number of structure samples |
 | `--sampling-steps N` | `200` | Diffusion sampling steps |
-| `--no-msa-server` | — | Disable MSA generation via MMseqs2 server (on by default) |
+| `--no-msa-server` | MSA on | Opt out of MMseqs2 MSA generation. **MSA is on by default** — `--use_msa_server` is added to the generated `job.sh` automatically. Only pass this flag if every YAML ships a precomputed `.a3m`; otherwise Boltz aborts with `Missing MSA's in input`. |
 | `--model boltz1\|boltz2` | `boltz2` | Model version |
 | `--output-format mmcif\|pdb` | `mmcif` | Structure output format |
 | `--use-potentials` | off | Apply physics-based steering potentials |

@@ -312,7 +312,12 @@ examples:
                         help="Diffusion sampling steps (default: 200).")
     bp_grp.add_argument("--no-msa-server", action="store_false", dest="use_msa_server",
                         default=True,
-                        help="Disable MSA generation via MMseqs2 server (on by default).")
+                        help="Opt OUT of MSA generation via MMseqs2 server. "
+                             "MSA is ON BY DEFAULT — the generated job.sh always "
+                             "includes `--use_msa_server` unless this flag is set. "
+                             "Only pass --no-msa-server when every YAML already ships "
+                             "a precomputed MSA (.a3m); without an MSA, Boltz aborts "
+                             "with 'Missing MSA's in input and --use_msa_server flag not set'.")
     bp_grp.add_argument("--model", default="boltz2", choices=["boltz1", "boltz2"],
                         help="Model version (default: boltz2).")
     bp_grp.add_argument("--output-format", default="mmcif", choices=["mmcif", "pdb"],

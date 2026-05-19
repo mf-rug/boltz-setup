@@ -57,7 +57,7 @@ sequences:
 
 ### Supported entity types
 
-- **protein**: `sequence` (one-letter AA codes), optional `msa` (.a3m path) or `--use_msa_server`
+- **protein**: `sequence` (one-letter AA codes). MSA is required: either embed a precomputed `msa` (.a3m path) in the YAML, or rely on the boltz CLI's `--use_msa_server` flag (which `boltz-setup-yaml` adds by default — opt out with `--no-msa-server`).
 - **dna**: `sequence`
 - **rna**: `sequence`
 - **ligand**: `smiles` or `ccd` (mutually exclusive)
