@@ -36,7 +36,7 @@ from .generate import (
     validate_rna_sequence,
     validate_smiles,
 )
-from .cluster import BOLTZ_CACHE_DIR, PYTHON_MODULE
+from . import cluster as _cluster
 
 
 # ---------------------------------------------------------------------------
@@ -363,13 +363,26 @@ examples:
         "--init", action="store_true",
         help="Detect boltz binary and model cache on the cluster via SSH, then update config.",
     )
+    out_grp.add_argument(
+        "--cluster", metavar="NAME", default=None,
+        help="Target cluster from ~/.config/boltz-setup/config.yaml "
+             "(default: the config's default_cluster). Sets the partition, GPU "
+             "tiers, python module, venv, and cache paths for that cluster.",
+    )
 
     args = parser.parse_args()
 
+    # Select the target cluster (populates cluster module constants).
+    if args.cluster is not None and args.cluster not in _cluster.available_clusters():
+        parser.error(
+            f"unknown --cluster '{args.cluster}'. "
+            f"Available: {', '.join(_cluster.available_clusters())}"
+        )
+    _cluster.select_cluster(args.cluster)
+
     # --init: SSH detection, then exit
     if args.init:
-        from .cluster import run_init
-        run_init()
+        _cluster.run_init()
         return
 
     # Validate output mode
@@ -553,9 +566,8 @@ examples:
     gpu_sbatch = args.gpu or gpu_rec["gpu_sbatch"]
     mem = args.mem or gpu_rec["mem"]
 
-    # Single per-user venv (one wheel covers every Hábrók GPU).
-    from .cluster import VENV_PATH
-    venv = VENV_PATH
+    # Per-cluster venv + cache + module (resolved by select_cluster above).
+    venv = _cluster.VENV_PATH
 
     slurm_params = SlurmParams(
         job_name=args.name,
@@ -568,10 +580,10 @@ examples:
     )
     job_script = build_job_script(
         job_dir=str(out_dir),
-        cache_dir=BOLTZ_CACHE_DIR,
+        cache_dir=_cluster.BOLTZ_CACHE_DIR,
         boltz_params=bp,
         slurm_params=slurm_params,
-        python_module=PYTHON_MODULE,
+        python_module=_cluster.PYTHON_MODULE,
         venv=venv,
     )
     (out_dir / "job.sh").write_text(job_script)
@@ -598,11 +610,11 @@ examples:
     print(f"Wrote job.sh to {out_dir}/")
     print(f"Copied boltz_tools/ to {out_dir}/")
     print(
-        f"  Slurm: partition={partition}  time={time_str}  "
-        f"gpu={gpu_sbatch}  mem={mem}"
+        f"  Cluster: {_cluster.SELECTED_CLUSTER}   "
+        f"partition={partition}  time={time_str}  gpu={gpu_sbatch}  mem={mem}"
     )
-    print(f"  Cache: {BOLTZ_CACHE_DIR}")
+    print(f"  Cache: {_cluster.BOLTZ_CACHE_DIR}")
     if venv:
         print(f"  Venv:  {venv}")
     print(f"\nTo submit:")
-    print(f"  hpc-submit {out_dir}/job.sh")
+    print(f"  hpcjob submit {out_dir}/job.sh --cluster {_cluster.SELECTED_CLUSTER}")

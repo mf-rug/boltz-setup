@@ -206,26 +206,50 @@ _DEFAULTS: Dict[str, Any] = {
 # Config loading
 # ---------------------------------------------------------------------------
 
-def _load_config() -> Dict[str, Any]:
-    """Load ~/.config/boltz-setup/config.yaml, writing defaults if absent."""
+def _load_raw_config() -> Dict[str, Any]:
+    """Load ~/.config/boltz-setup/config.yaml verbatim, writing defaults if absent."""
     if CONFIG_PATH.exists():
         try:
             import yaml
-            raw = yaml.safe_load(CONFIG_PATH.read_text()) or {}
-            merged = dict(_DEFAULTS)
-            merged.update(raw)
-            # Merge nested `venv` block so users who only set `venv.path` still
-            # get the default pip_install list (and vice versa).
-            if "venv" in raw and isinstance(raw["venv"], dict):
-                v = dict(_DEFAULTS["venv"])
-                v.update(raw["venv"])
-                merged["venv"] = v
-            return merged
+            return yaml.safe_load(CONFIG_PATH.read_text()) or {}
         except Exception:
             pass
     # First run: write defaults so the user can find and edit them
     _write_default_config()
     return dict(_DEFAULTS)
+
+
+def _normalize_registry(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a {default_cluster, clusters} registry from any config shape.
+
+    A legacy flat config (no top-level 'clusters' mapping) is wrapped as a
+    single cluster named 'default', so existing single-cluster setups keep
+    working unchanged and with no --cluster needed.
+    """
+    if isinstance(raw, dict) and isinstance(raw.get("clusters"), dict) and raw["clusters"]:
+        reg = dict(raw)
+        if not reg.get("default_cluster"):
+            reg["default_cluster"] = next(iter(reg["clusters"]))
+        return reg
+    return {"default_cluster": "default", "clusters": {"default": raw}}
+
+
+def _merge_block(block: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge one cluster block over _DEFAULTS, including the nested venv block."""
+    merged = dict(_DEFAULTS)
+    merged.update(block or {})
+    if isinstance((block or {}).get("venv"), dict):
+        v = dict(_DEFAULTS["venv"])
+        v.update(block["venv"])
+        merged["venv"] = v
+    return merged
+
+
+def _load_config() -> Dict[str, Any]:
+    """Compat: merged config for the currently selected cluster."""
+    reg = _normalize_registry(_RAW)
+    name = SELECTED_CLUSTER or reg.get("default_cluster")
+    return _merge_block(reg["clusters"].get(name, {}))
 
 
 def _write_config(cfg: Dict[str, Any]) -> None:
@@ -254,26 +278,107 @@ def _write_default_config() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Exported constants (resolved at import time)
+# Exported constants — (re)populated by select_cluster()
 # ---------------------------------------------------------------------------
 
-_cfg = _load_config()
-_user = _cluster_user()
+_RAW: Dict[str, Any] = _load_raw_config()
+_cfg: Dict[str, Any] = {}
+_user: str = ""
+
+PYTHON_MODULE: str = ""
+SCRATCH: str = ""
+BOLTZ_CACHE_DIR: str = ""
+BOLTZ_JOBS_DIR: str = ""
+GPU_TIERS: List[Dict] = []
+VENV_PATH: str = ""
+VENV_PIP_INSTALL: List[str] = []
+PARTITIONS: List[Dict] = []
+EPILOG_MARKER: str = ""
+ON_CLUSTER: bool = False
+SELECTED_CLUSTER: str = ""
+SSH_TARGET: Optional[str] = None
+
 
 def _expand(s: str) -> str:
-    return s.replace("{user}", _user)
+    return s.replace("{user}", _user) if isinstance(s, str) else s
 
-PYTHON_MODULE: str     = _cfg["python_module"]
-SCRATCH: str           = _expand(_cfg["scratch_dir"])
-BOLTZ_CACHE_DIR: str   = _expand(_cfg["cache_dir"])
-BOLTZ_JOBS_DIR: str    = _expand(_cfg["jobs_dir"])
-GPU_TIERS: List[Dict]  = _cfg["gpu_tiers"]
-_venv_cfg              = _cfg.get("venv") or {}
-VENV_PATH: str         = _expand(_venv_cfg.get("path", "")) if _venv_cfg.get("path") else ""
-VENV_PIP_INSTALL: List[str] = list(_venv_cfg.get("pip_install", []))
-PARTITIONS: List[Dict] = _cfg["partitions"]
-EPILOG_MARKER: str     = _cfg.get("epilog_marker", "")
-ON_CLUSTER: bool       = _cfg.get("on_cluster", False)
+
+def available_clusters() -> List[str]:
+    """List cluster names defined in the config registry."""
+    return list(_normalize_registry(_RAW)["clusters"].keys())
+
+
+def _user_for_block(block: Dict[str, Any]) -> str:
+    """Resolve {user} for a cluster block; only does SSH work if a path needs it."""
+    paths = [block.get("scratch_dir", ""), block.get("cache_dir", ""),
+             block.get("jobs_dir", ""), (block.get("venv") or {}).get("path", "")]
+    if not any("{user}" in (p or "") for p in paths):
+        return ""  # nothing to substitute — skip SSH detection entirely
+    if block.get("on_cluster", False):
+        return os.environ.get("LOGNAME") or os.environ.get("USER", "user")
+    tgt = block.get("ssh_target")
+    if tgt:
+        u = _resolve_ssh_user(tgt)
+        if u:
+            return u
+    return _cluster_user()
+
+
+def select_cluster(name: Optional[str] = None) -> str:
+    """Select a cluster and (re)populate the exported module constants.
+
+    Returns the resolved cluster name; exits with an error on an unknown name.
+    Call before generating a job script to target a specific cluster.
+    """
+    global _cfg, _user, PYTHON_MODULE, SCRATCH, BOLTZ_CACHE_DIR, BOLTZ_JOBS_DIR
+    global GPU_TIERS, VENV_PATH, VENV_PIP_INSTALL, PARTITIONS, EPILOG_MARKER
+    global ON_CLUSTER, SELECTED_CLUSTER, SSH_TARGET
+
+    reg = _normalize_registry(_RAW)
+    clusters = reg["clusters"]
+    if name is None:
+        name = reg.get("default_cluster") or next(iter(clusters))
+    if name not in clusters:
+        avail = ", ".join(sorted(clusters))
+        print(f"[boltz-setup] Error: unknown cluster '{name}'. Available: {avail}",
+              file=sys.stderr)
+        raise SystemExit(1)
+
+    block = _merge_block(clusters[name])
+    _cfg = block
+    _user = _user_for_block(block)
+
+    PYTHON_MODULE = block["python_module"]
+    SCRATCH = _expand(block["scratch_dir"])
+    BOLTZ_CACHE_DIR = _expand(block["cache_dir"])
+    BOLTZ_JOBS_DIR = _expand(block["jobs_dir"])
+    GPU_TIERS = block["gpu_tiers"]
+    _venv = block.get("venv") or {}
+    VENV_PATH = _expand(_venv.get("path", "")) if _venv.get("path") else ""
+    VENV_PIP_INSTALL = list(_venv.get("pip_install", []))
+    PARTITIONS = block["partitions"]
+    EPILOG_MARKER = block.get("epilog_marker", "")
+    ON_CLUSTER = block.get("on_cluster", False)
+    SELECTED_CLUSTER = name
+    SSH_TARGET = block.get("ssh_target")
+    return name
+
+
+def _save_selected_block(updates: Dict[str, Any]) -> None:
+    """Apply `updates` to the selected cluster's block and persist the registry."""
+    reg = _normalize_registry(_RAW)
+    name = SELECTED_CLUSTER or reg.get("default_cluster")
+    block = dict(reg["clusters"].get(name, {}))
+    block.update(updates)
+    block.pop("boltz_bin", None)
+    reg["clusters"][name] = block
+    _RAW.clear()
+    _RAW.update(reg)
+    _write_config(reg)
+
+
+# Populate constants for the default cluster at import time.
+select_cluster(None)
 
 
 # ---------------------------------------------------------------------------
@@ -362,8 +467,8 @@ def run_init() -> None:
     print("boltz-setup: cluster detection")
     print("=" * 40)
 
-    # Resolve SSH target
-    ssh_target = _get_ssh_target()
+    # Resolve SSH target (prefer the selected cluster's configured target)
+    ssh_target = SSH_TARGET or _get_ssh_target()
     if not ssh_target:
         ssh_target = input("SSH target (e.g. 'hpc' or 'user@cluster.example.com'): ").strip()
         if not ssh_target:
@@ -401,15 +506,11 @@ def run_init() -> None:
         cache_dir_input = input(f"  Cache path on cluster [{suggestion}]: ").strip()
         cache_dir = cache_dir_input or suggestion
 
-    # Load existing config (preserve gpu_tiers, partitions, etc.) and update
+    # Update the selected cluster's block (preserving gpu_tiers, partitions, …).
     cfg = _load_config()
-    cfg["cache_dir"] = cache_dir  # absolute path — no {user} substitution needed
-    # Drop the obsolete boltz_bin field if an old config still has it
-    cfg.pop("boltz_bin", None)
-
     try:
-        _write_config(cfg)
-        print(f"\nConfig updated: {CONFIG_PATH}")
+        _save_selected_block({"cache_dir": cache_dir})
+        print(f"\nConfig updated: {CONFIG_PATH} (cluster: {SELECTED_CLUSTER or 'default'})")
     except Exception as e:
         print(f"Failed to write config: {e}", file=sys.stderr)
 
