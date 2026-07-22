@@ -198,6 +198,18 @@ def parse_slurm_log(text: str) -> ParsedLog:
             log.exit_code = int(m.group(1))
             log.wall_seconds = int(m.group(2))
 
+    # --- job.sh retry reconciliation ---
+    # The generated job.sh retries once after a transient failure (e.g. a truncated MSA
+    # download). If the job still ended successfully, the retry produced output, so the
+    # attempt-1 "Failed to process" / traceback lines are stale — drop them so the status
+    # override (Phase 5) and the prediction-dir matching don't treat a recovered input as
+    # failed (which would both mislabel BOLTZ_ERROR and skip promotion to output/).
+    retried = any("retrying once" in ln for ln in lines)
+    job_ok = log.status == "COMPLETED" or log.trap_message == "completed"
+    if retried and job_ok:
+        log.failed_inputs = []
+        log.has_traceback = False
+
     # Remove failed inputs from successfully_processed
     if log.failed_inputs:
         failed_set = set(log.failed_inputs)
