@@ -870,7 +870,25 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 cd "$_job_dir"
 
+# --- boltz prediction, with one automatic retry on transient failure ---
+# The public MSA server occasionally returns a truncated tarball under load; boltz
+# then skips the input but still exits 0, so failure is detected by the absence of a
+# predicted structure. Retry once (clearing the stale MSA download first).
+_run_boltz() {{
 {boltz_cmd}
+}}
+_boltz_ok() {{ find ./output -name "*_model_0.cif" -print -quit 2>/dev/null | grep -q .; }}
+
+set +e
+_run_boltz
+if ! _boltz_ok; then
+    echo "boltz produced no structure on attempt 1 -- clearing MSA cache, waiting 120s, retrying once"
+    rm -rf ./output/*/msa 2>/dev/null || true
+    sleep 120
+    _run_boltz
+fi
+set -e
+_boltz_ok || {{ echo "boltz produced no structure after retry" >&2; exit 1; }}
 
 echo "done $(date)"
 """

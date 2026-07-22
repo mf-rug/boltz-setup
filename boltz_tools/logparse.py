@@ -5,6 +5,7 @@ and affinity scores, and produces a clean, human-readable log file.
 """
 
 import json
+import os
 import re
 import sys
 from dataclasses import dataclass, field
@@ -303,10 +304,13 @@ def load_affinity_scores(pred_dir: Path) -> List[Dict]:
 # ---------------------------------------------------------------------------
 
 def _rename_cif(name: str, job_name: str) -> str:
-    """Rename e.g. 'test_model_0.cif' to 'mdl1_test.cif' (1-indexed)."""
+    """Rename e.g. 'test_model_0.cif' to 'mdl0_test.cif'.
+
+    0-indexed so the mdl<N> number matches Boltz's own model_<N> and the
+    per-model npz/confidence indices (mdl0 == model_0 == best-ranked)."""
     m = re.match(r'(.+)_model_(\d+)\.cif$', name)
     if m:
-        num = int(m.group(2)) + 1
+        num = int(m.group(2))
         return f"mdl{num}_{m.group(1)}.cif"
     return name
 
@@ -324,62 +328,46 @@ def _fix_ligand_ids(text: str) -> str:
 
 
 def _promote_outputs(job_dir: Path, pred_dir: Path, multi_variant: bool = False) -> List[Path]:
-    """Move .cif and affinity JSON files to output/, leave symlinks behind.
+    """Expose key outputs in output/ as symlinks; keep the originals in predictions/.
 
-    CIF files are renamed: test_model_0.cif -> mdl1_test.cif (1-indexed).
-    When *multi_variant* is True, the variant subdirectory name is included
-    in the promoted filename for uniqueness (e.g. mdl1_job_001.cif).
-    Ligand IDs are fixed: LIG1 -> LIG01 (wwPDB compliance).
-    Returns list of promoted file paths in output/.
+    The originals stay in *pred_dir* (Boltz's native location, next to their npz and
+    confidence JSONs); output/ just gets a **relative** symlink named mdl<N>_<job>.cif
+    (0-indexed, matching model_<N>). Relative symlinks survive `rsync` back to a
+    workstation because both dirs are transferred — unlike the previous
+    move-to-output + absolute-symlink-in-predictions, which left broken symlinks on pull.
+    When *multi_variant* is True the variant subdir name is used for uniqueness.
+    Ligand IDs are fixed in place: LIG1 -> LIG01 (wwPDB compliance).
+    Returns list of symlink paths created in output/.
     """
     output_dir = job_dir / "output"
-    promoted = []
+    output_dir.mkdir(exist_ok=True)
+    linked = []
     variant_name = pred_dir.name if multi_variant else None
 
-    # CIF structures: promote new files, fix ligand IDs in all
-    for src in sorted(pred_dir.glob("*.cif")):
-        if not src.is_symlink():
-            # New file: fix, rename, move, symlink
-            content = src.read_text()
-            fixed = _fix_ligand_ids(content)
-            if fixed != content:
-                src.write_text(fixed)
-            if variant_name:
-                new_name = _rename_cif(src.name, variant_name)
-            else:
-                new_name = _rename_cif(src.name, job_dir.name)
-            dest = output_dir / new_name
-            if dest.exists():
-                continue
-            src.rename(dest)
-            src.symlink_to(dest)
-            promoted.append(dest)
+    def _link(src: Path, name: str):
+        link = output_dir / name
+        if link.exists() or link.is_symlink():
+            return
+        link.symlink_to(os.path.relpath(src, output_dir))
+        linked.append(link)
 
-    # Fix ligand IDs in already-promoted CIF files
-    for cif in sorted(output_dir.glob("*.cif")):
-        if cif.is_symlink():
+    # CIF structures: fix ligand IDs in place, then symlink into output/ (0-indexed name)
+    for src in sorted(pred_dir.glob("*.cif")):
+        if src.is_symlink():
             continue
-        content = cif.read_text()
+        content = src.read_text()
         fixed = _fix_ligand_ids(content)
         if fixed != content:
-            cif.write_text(fixed)
+            src.write_text(fixed)
+        _link(src, _rename_cif(src.name, variant_name or job_dir.name))
 
     # Affinity JSONs — prefix with variant name for multi-variant uniqueness
     for src in sorted(pred_dir.glob("affinity_*.json")):
         if src.is_symlink():
             continue
-        if variant_name:
-            dest_name = f"{variant_name}_{src.name}"
-        else:
-            dest_name = src.name
-        dest = output_dir / dest_name
-        if dest.exists():
-            continue
-        src.rename(dest)
-        src.symlink_to(dest)
-        promoted.append(dest)
+        _link(src, f"{variant_name}_{src.name}" if variant_name else src.name)
 
-    return promoted
+    return linked
 
 
 # ---------------------------------------------------------------------------
