@@ -73,7 +73,6 @@ class BoltzParams:
     model: str = "boltz2"
     output_format: str = "mmcif"
     use_potentials: bool = False
-    override: bool = False
     seed: Optional[int] = None
     affinity_mw_correction: bool = False
     no_kernels: bool = False
@@ -760,8 +759,9 @@ def _boltz_flags(bp: BoltzParams) -> List[str]:
         parts.append(f"--output_format {bp.output_format}")
     if bp.use_potentials:
         parts.append("--use_potentials")
-    if bp.override:
-        parts.append("--override")
+    # always on: a resubmit keeps the remote output/ (hpcjob --overwrite excludes it), so without
+    # this Boltz finds the stale predictions and silently skips re-running. MSA in output/ is reused.
+    parts.append("--override")
     if bp.seed is not None:
         parts.append(f"--seed {bp.seed}")
     if bp.affinity_mw_correction:
