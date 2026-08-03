@@ -1,0 +1,36 @@
+#!/bin/bash
+# Mirror the boltz-hpc skill from the Dropbox-synced skills tree (where Claude
+# actually edits it) into the repo before each commit, so the published skill
+# never drifts from the tools it documents.
+#
+# Enable once per clone:
+#     git config core.hooksPath .githooks
+# Without that, this file does nothing and skill edits are silently left
+# unstaged. Check with `git config core.hooksPath`.
+set -e
+
+ROOT="$(git rev-parse --show-toplevel)"
+SRC="$HOME/.claude/skills/boltz-hpc/SKILL.md"
+DST="$ROOT/skills/boltz-hpc/SKILL.md"
+
+[ -f "$SRC" ] || exit 0        # skill not installed here; nothing to mirror
+
+# The source lives in Dropbox. If it is mid-sync it can briefly be empty or
+# truncated, and copying that over a good file turns another machine's work
+# into a deletion that looks deliberate in the diff. A skill this size is
+# never legitimately tiny, so treat a small source as stale and refuse.
+src_lines=$(wc -l < "$SRC" | tr -d ' ')
+if [ "$src_lines" -lt 50 ]; then
+    echo "pre-commit: REFUSING to mirror the skill — $SRC has only $src_lines" >&2
+    echo "            lines, which looks like a stale or mid-sync Dropbox copy." >&2
+    echo "            Check Dropbox has finished syncing, then commit again." >&2
+    echo "            To bypass once: SKIP_SKILL_MIRROR=1 git commit ..." >&2
+    [ "${SKIP_SKILL_MIRROR:-0}" = "1" ] || exit 1
+fi
+
+mkdir -p "$(dirname "$DST")"
+if ! cmp -s "$SRC" "$DST"; then
+    cp "$SRC" "$DST"
+    echo "pre-commit: mirrored skill from ~/.claude/skills/boltz-hpc/SKILL.md"
+    git add "$DST"
+fi

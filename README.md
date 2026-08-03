@@ -12,6 +12,21 @@ Boltz-2 predicts structures of biomolecular complexes — proteins, DNA, RNA, an
 | `boltz-setup-yaml` | Non-interactive CLI — all options as flags, for scripts and pipelines |
 | `boltz-setup log <dir>` | Parse a finished job's Slurm log into a clean summary |
 
+## Claude Code skill
+
+`skills/boltz-hpc/SKILL.md` teaches [Claude Code](https://claude.com/claude-code)
+to drive this toolkit — which flags to use, how to submit and fetch results, and
+the non-obvious gotchas in setting up and interpreting co-folds. Install it by
+copying (or symlinking) that directory to `~/.claude/skills/boltz-hpc/`.
+
+A pre-commit hook mirrors the installed copy back into the repo, so the
+published skill cannot drift from the tools it documents. Enable it once per
+clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
 ---
 
 ## Installation
