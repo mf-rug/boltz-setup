@@ -342,6 +342,13 @@ def select_cluster(name: Optional[str] = None) -> str:
         avail = ", ".join(sorted(clusters))
         print(f"[boltz-setup] Error: unknown cluster '{name}'. Available: {avail}",
               file=sys.stderr)
+        # --init updates an existing block, it does not create one, so an
+        # unknown name is not something --init can fix. A config that predates
+        # multi-cluster support has exactly one block, which is why every job
+        # can silently go to one cluster while another sits idle.
+        print(f"[boltz-setup] Add a `clusters:` block for '{name}' to "
+              f"{CONFIG_PATH} first, then run --init --cluster {name} to fill in "
+              f"the detected paths.", file=sys.stderr)
         raise SystemExit(1)
 
     block = _merge_block(clusters[name])

@@ -53,6 +53,12 @@ e.g. `/scratch/$USER/venvs/boltz/`), populated with `torch==2.10.0+cu128` and
 and the pip installs run via a short Slurm job (the login node kills large pip
 installs).
 
+**Adding a cluster**: `--init --cluster NAME` *updates* an existing block, it does
+not create one — add the block to `config.yaml` first (a legacy single-cluster
+config has none, so every job silently goes to the one cluster it knows). Check
+whether that cluster already has a venv and populated cache before running
+`--init`, which otherwise rebuilds them.
+
 **Multi-cluster**: `boltz-setup-yaml --cluster NAME` bakes that cluster's
 partition, GPU tiers, `module load`, venv, and cache paths into the generated
 `job.sh`. Without `--cluster`, `default_cluster` is used. `hpcjob clusters` (or
