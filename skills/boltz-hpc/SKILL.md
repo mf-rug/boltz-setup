@@ -157,6 +157,22 @@ subcommand takes `--cluster NAME` (default: the registry's `default_cluster`).
 (import existing hpc-submit + rsyncer configs). List with `hpcjob clusters`; test a
 cluster with `hpcjob check --cluster NAME`.
 
+### Preflight — run this before submitting
+```bash
+hpcjob preflight --all                     # reachable? which GPUs are free?
+hpcjob preflight -c snellius --gpu a100:1  # + a note if that GPU is saturated
+hpcjob preflight -c snellius --quota       # + disk quota and SBU budget (opt-in)
+```
+One ssh round-trip: reachability, free GPUs per partition, queue pressure and
+fairshare standing. **A failed ssh is not evidence about your credentials** — a
+cluster in maintenance refuses connections in a way that reads as an auth error
+(Habrók returns `Permission denied (keyboard-interactive)` with every node
+down), so `preflight` fetches the configured status page whenever a cluster is
+unreachable and tells you which it is. Check that before touching ssh config.
+
+`--quota` is opt-in: site quota output carries personal data (names, emails,
+group members), so it stays out of routine checks.
+
 ### Submit
 ```bash
 hpcjob submit myjob/job.sh                    # default_cluster
